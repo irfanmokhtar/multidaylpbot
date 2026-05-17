@@ -1,0 +1,27 @@
+# dependencies
+node_modules/
+web/node_modules/
+.pnpm-store/
+
+# build output
+dist/
+web/dist/
+*.tsbuildinfo
+
+# env — all variants; commit .env.example only after redacting real keys
+.env
+.env.*
+!.env.example
+
+# runtime data
+data/
+
+# logs
+*.log
+
+# editor / OS
+.DS_Store
+.claude/
+
+# test
+coverage/
