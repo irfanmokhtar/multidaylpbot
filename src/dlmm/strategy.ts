@@ -10,7 +10,10 @@ import DLMM, { StrategyType } from "@meteora-ag/dlmm";
 import type { Decision } from "../ai/types";
 
 export const MIN_RANGE_WIDTH = 5;
-export const MAX_RANGE_WIDTH = 2000;
+// 343 = DEFAULT_BIN_PER_POSITION (70) + 3 × MAX_RESIZE_LENGTH (91). Solana tx
+// size + CU caps fit at most 3 increasePositionLength2 ix per init tx without
+// an Address Lookup Table, so wider single-position windows can't be opened.
+export const MAX_RANGE_WIDTH = 343;
 
 export function mapStrategyType(s: Decision["strategyType"]): StrategyType {
   switch (s) {

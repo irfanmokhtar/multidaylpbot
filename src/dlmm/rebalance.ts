@@ -30,11 +30,15 @@ import {
 import { BN } from "@coral-xyz/anchor";
 import {
   MAX_ACTIVE_BIN_SLIPPAGE,
+  DEFAULT_BIN_PER_POSITION,
+  MAX_RESIZE_LENGTH,
   getTokenBalance,
+  wrapSOLInstruction,
   type LbPosition,
 } from "@meteora-ag/dlmm";
 import {
   NATIVE_MINT,
+  createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
 
@@ -152,8 +156,23 @@ export async function executeRebalance(decision: Decision): Promise<RebalanceExe
   const compositionDeltaPp = Math.abs(target.xWeight - current.xWeight) * 100;
   const widthTrigger = widthDelta > cfg.WIDTH_CHANGE_TOLERANCE_BINS;
   const compositionTrigger = compositionDeltaPp > cfg.COMPOSITION_SHIFT_THRESHOLD_PCT;
+  // The balanced rebalance ix processes every bin in a single
+  // `rebalanceLiquidity` ix; it has no chunking. Existing positions wider
+  // than DEFAULT_BIN_PER_POSITION (70) risk tx-size / CU overrun, so we
+  // force the close-reopen path for them regardless of width or composition
+  // delta. Close-reopen handles wide positions via init+extend+chunked
+  // deposit.
+  const widePositionTrigger =
+    preWidth > DEFAULT_BIN_PER_POSITION.toNumber();
   const path: RebalancePath =
-    widthTrigger || compositionTrigger ? "close-reopen" : "balanced";
+    widthTrigger || compositionTrigger || widePositionTrigger
+      ? "close-reopen"
+      : "balanced";
+  const trigger = describeTrigger({
+    widthTrigger,
+    compositionTrigger,
+    widePositionTrigger,
+  });
 
   logger.info(
     {
@@ -171,13 +190,8 @@ export async function executeRebalance(decision: Decision): Promise<RebalanceExe
       currentXWeight: round3(current.xWeight),
       compositionDeltaPp: round3(compositionDeltaPp),
       compositionThresholdPp: cfg.COMPOSITION_SHIFT_THRESHOLD_PCT,
-      trigger: widthTrigger && compositionTrigger
-        ? "both"
-        : widthTrigger
-        ? "width"
-        : compositionTrigger
-        ? "composition"
-        : "none",
+      widePosition: widePositionTrigger,
+      trigger,
       strategy: decision.strategyType,
       path,
     },
@@ -209,6 +223,18 @@ export async function executeRebalance(decision: Decision): Promise<RebalanceExe
 
 function round3(n: number): number {
   return Math.round(n * 1000) / 1000;
+}
+
+function describeTrigger(t: {
+  widthTrigger: boolean;
+  compositionTrigger: boolean;
+  widePositionTrigger: boolean;
+}): string {
+  const parts: string[] = [];
+  if (t.widthTrigger) parts.push("width");
+  if (t.compositionTrigger) parts.push("composition");
+  if (t.widePositionTrigger) parts.push("wide-position");
+  return parts.length === 0 ? "none" : parts.join("+");
 }
 
 // ─── balanced re-center (width preserved) ────────────────────────────────────
@@ -470,28 +496,172 @@ async function executeCloseAndReopen(
     );
   }
 
-  // 6. Open the new position. Fresh keypair must co-sign the create tx.
+  // 6. Open the new position.
+  //
+  //   width ≤ DEFAULT_BIN_PER_POSITION (70): single tx via SDK helper. The
+  //   init ix's CPI realloc fits within the 10240-byte cap, and SOL wrapping
+  //   is bundled.
+  //
+  //   71 ≤ width ≤ MAX_RANGE_WIDTH: the helper's single-shot
+  //   `initializePosition` ix overruns Solana's inner-realloc cap, so we
+  //   split: (a) initializePosition2 + N×increasePositionLength2 to grow the
+  //   position to the requested width in one tx, (b) wrap SOL into the WSOL
+  //   ATA if X or Y is native (chunkable deposits don't auto-wrap),
+  //   (c) chunked addLiquidityByStrategyChunkable txs (one per 70-bin chunk).
   const newPositionKp = Keypair.generate();
-  const initTx = await pool.initializePositionAndAddLiquidityByStrategy({
-    positionPubKey: newPositionKp.publicKey,
-    totalXAmount,
-    totalYAmount,
-    strategy: {
-      minBinId: window.minBinId,
-      maxBinId: window.maxBinId,
-      strategyType: mapStrategyType(decision.strategyType),
-    },
-    user: wallet.publicKey,
-    slippage: cfg.REBALANCE_SLIPPAGE_PCT,
-  });
-  signatures.push(
-    await sendBuiltTx(
-      "open-new-position",
-      initTx,
-      [wallet, newPositionKp],
-      connection,
-    ),
-  );
+  const defaultBinsPerPosition = DEFAULT_BIN_PER_POSITION.toNumber();
+  const maxResizeLength = MAX_RESIZE_LENGTH.toNumber();
+  const useChunkedReopen = window.width > defaultBinsPerPosition;
+
+  if (!useChunkedReopen) {
+    const initTx = await pool.initializePositionAndAddLiquidityByStrategy({
+      positionPubKey: newPositionKp.publicKey,
+      totalXAmount,
+      totalYAmount,
+      strategy: {
+        minBinId: window.minBinId,
+        maxBinId: window.maxBinId,
+        strategyType: mapStrategyType(decision.strategyType),
+      },
+      user: wallet.publicKey,
+      slippage: cfg.REBALANCE_SLIPPAGE_PCT,
+    });
+    signatures.push(
+      await sendBuiltTx(
+        "open-new-position",
+        initTx,
+        [wallet, newPositionKp],
+        connection,
+      ),
+    );
+  } else {
+    // 6a. init + extend.
+    const initialWidth = Math.min(window.width, defaultBinsPerPosition);
+    type AnchorMethod = (...args: unknown[]) => {
+      accountsPartial: (a: Record<string, PublicKey>) => {
+        instruction: () => Promise<TransactionInstruction>;
+      };
+    };
+    const program = pool.program as unknown as {
+      methods: {
+        initializePosition2: AnchorMethod;
+        increasePositionLength2: AnchorMethod;
+      };
+    };
+    const initIx = await program.methods
+      .initializePosition2(window.minBinId, initialWidth)
+      .accountsPartial({
+        payer: wallet.publicKey,
+        position: newPositionKp.publicKey,
+        lbPair: pool.pubkey,
+        owner: wallet.publicKey,
+      })
+      .instruction();
+
+    const extendIxs: TransactionInstruction[] = [];
+    let currentEndBin = window.minBinId + initialWidth - 1;
+    while (currentEndBin < window.maxBinId) {
+      currentEndBin = Math.min(currentEndBin + maxResizeLength, window.maxBinId);
+      const extIx = await program.methods
+        .increasePositionLength2(currentEndBin)
+        .accountsPartial({
+          funder: wallet.publicKey,
+          lbPair: pool.pubkey,
+          position: newPositionKp.publicKey,
+          owner: wallet.publicKey,
+        })
+        .instruction();
+      extendIxs.push(extIx);
+    }
+
+    logger.info(
+      {
+        position: newPositionKp.publicKey.toBase58(),
+        minBinId: window.minBinId,
+        maxBinId: window.maxBinId,
+        width: window.width,
+        initialWidth,
+        extendCount: extendIxs.length,
+      },
+      "close-reopen: init+extend position",
+    );
+
+    signatures.push(
+      await sendIxBundleWithExtraSigners(
+        "create-and-extend-position",
+        [initIx, ...extendIxs],
+        wallet,
+        [newPositionKp],
+        connection,
+      ),
+    );
+
+    // 6b. Wrap native SOL into its WSOL ATA so the chunkable deposit ixs see
+    //     a funded user token account. Chunkable creates the ATA itself
+    //     (idempotent), but never transfers SOL into it.
+    const wrapIxs: TransactionInstruction[] = [];
+    if (xMint.equals(NATIVE_MINT) && !totalXAmount.isZero()) {
+      const ataX = getAssociatedTokenAddressSync(NATIVE_MINT, wallet.publicKey);
+      wrapIxs.push(
+        createAssociatedTokenAccountIdempotentInstruction(
+          wallet.publicKey,
+          ataX,
+          wallet.publicKey,
+          NATIVE_MINT,
+        ),
+        ...wrapSOLInstruction(
+          wallet.publicKey,
+          ataX,
+          BigInt(totalXAmount.toString()),
+        ),
+      );
+    }
+    if (yMint.equals(NATIVE_MINT) && !totalYAmount.isZero()) {
+      const ataY = getAssociatedTokenAddressSync(NATIVE_MINT, wallet.publicKey);
+      wrapIxs.push(
+        createAssociatedTokenAccountIdempotentInstruction(
+          wallet.publicKey,
+          ataY,
+          wallet.publicKey,
+          NATIVE_MINT,
+        ),
+        ...wrapSOLInstruction(
+          wallet.publicKey,
+          ataY,
+          BigInt(totalYAmount.toString()),
+        ),
+      );
+    }
+    if (wrapIxs.length > 0) {
+      signatures.push(
+        await sendIxBundle("wrap-sol", wrapIxs, wallet, connection),
+      );
+    }
+
+    // 6c. Chunked add-liquidity.
+    const liquidityTxs = await pool.addLiquidityByStrategyChunkable({
+      positionPubKey: newPositionKp.publicKey,
+      totalXAmount,
+      totalYAmount,
+      strategy: {
+        minBinId: window.minBinId,
+        maxBinId: window.maxBinId,
+        strategyType: mapStrategyType(decision.strategyType),
+      },
+      user: wallet.publicKey,
+      slippage: cfg.REBALANCE_SLIPPAGE_PCT,
+    });
+    for (let i = 0; i < liquidityTxs.length; i++) {
+      signatures.push(
+        await sendBuiltTx(
+          `add-liquidity-chunk-${i + 1}/${liquidityTxs.length}`,
+          liquidityTxs[i]!,
+          [wallet],
+          connection,
+        ),
+      );
+    }
+  }
 
   return {
     path: "close-reopen",
@@ -521,6 +691,16 @@ async function sendIxBundle(
   wallet: ReturnType<typeof loadWallet>,
   connection: ReturnType<typeof getConnection>,
 ): Promise<string> {
+  return sendIxBundleWithExtraSigners(label, ixs, wallet, [], connection);
+}
+
+async function sendIxBundleWithExtraSigners(
+  label: string,
+  ixs: TransactionInstruction[],
+  wallet: ReturnType<typeof loadWallet>,
+  extraSigners: Keypair[],
+  connection: ReturnType<typeof getConnection>,
+): Promise<string> {
   const tx = new Transaction().add(
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10_000 }),
     ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }),
@@ -534,11 +714,16 @@ async function sendIxBundle(
   tx.lastValidBlockHeight = lastValidBlockHeight;
 
   logger.info({ label, ixCount: ixs.length }, "tx: sending");
-  const sig = await sendAndConfirmTransaction(connection, tx, [wallet], {
-    commitment: "confirmed",
-    skipPreflight: false,
-    maxRetries: 3,
-  });
+  const sig = await sendAndConfirmTransaction(
+    connection,
+    tx,
+    [wallet, ...extraSigners],
+    {
+      commitment: "confirmed",
+      skipPreflight: false,
+      maxRetries: 3,
+    },
+  );
   logger.info({ label, signature: sig }, "tx: confirmed");
   return sig;
 }
@@ -630,8 +815,13 @@ export interface RebalancePreview {
   currentXWeight: number | null;
   /** |target − current| in percentage points. */
   compositionDeltaPp: number | null;
-  /** "width" | "composition" | "both" | "none" — which trigger picked the path. */
-  pathTrigger: "width" | "composition" | "both" | "none" | null;
+  /**
+   * Plus-joined trigger names that picked the path
+   * (e.g. "width", "width+composition", "wide-position"), "none", or null.
+   */
+  pathTrigger: string | null;
+  /** True when existing position width > DEFAULT_BIN_PER_POSITION (70). */
+  widePosition: boolean | null;
 }
 
 export async function previewRebalance(decision: Decision): Promise<RebalancePreview> {
@@ -712,11 +902,13 @@ export async function previewRebalance(decision: Decision): Promise<RebalancePre
       currentXWeight: null,
       compositionDeltaPp: null,
       pathTrigger: null,
+      widePosition: null,
     };
   }
   const p = userPositions[0]!;
   const d = p.positionData;
   const existingWidth = d.upperBinId - d.lowerBinId + 1;
+  const widePositionTrigger = existingWidth > DEFAULT_BIN_PER_POSITION.toNumber();
   const widthDelta = requestedBounds
     ? Math.abs(requestedBounds.width - existingWidth)
     : null;
@@ -727,14 +919,14 @@ export async function previewRebalance(decision: Decision): Promise<RebalancePre
     const compositionTrigger =
       compositionDeltaPp !== null &&
       compositionDeltaPp > cfg.COMPOSITION_SHIFT_THRESHOLD_PCT;
-    path = widthTrigger || compositionTrigger ? "close-reopen" : "balanced";
-    pathTrigger = widthTrigger && compositionTrigger
-      ? "both"
-      : widthTrigger
-      ? "width"
-      : compositionTrigger
-      ? "composition"
-      : "none";
+    path = widthTrigger || compositionTrigger || widePositionTrigger
+      ? "close-reopen"
+      : "balanced";
+    pathTrigger = describeTrigger({
+      widthTrigger,
+      compositionTrigger,
+      widePositionTrigger,
+    });
   }
   return {
     positionAddress: p.publicKey.toBase58(),
@@ -753,6 +945,7 @@ export async function previewRebalance(decision: Decision): Promise<RebalancePre
     currentXWeight: currentXWeightVal,
     compositionDeltaPp,
     pathTrigger,
+    widePosition: widePositionTrigger,
   };
 }
 
@@ -787,7 +980,7 @@ export function explainPreview(p: RebalancePreview): string {
     if (p.currentXWeight !== null && p.compositionDeltaPp !== null) {
       const cx = Math.round(p.currentXWeight * 100);
       const cy = 100 - cx;
-      const triggers = p.pathTrigger === "composition" || p.pathTrigger === "both"
+      const triggers = p.pathTrigger?.includes("composition")
         ? "  *forces close+reopen*"
         : "";
       lines.push(

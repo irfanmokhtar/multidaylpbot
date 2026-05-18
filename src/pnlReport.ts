@@ -85,9 +85,9 @@ export interface PnlReport {
 const CACHE_TTL_MS = 60_000;
 const cache = new Map<string, { at: number; report: PnlReport }>();
 
-function num(s: string | null | undefined): number {
+function num(s: string | number | null | undefined): number {
   if (s == null) return 0;
-  const n = parseFloat(s);
+  const n = typeof s === "number" ? s : parseFloat(s);
   return Number.isFinite(n) ? n : 0;
 }
 
@@ -116,8 +116,8 @@ function mapPosition(p: PositionPnLData): PnlReportPosition {
     closedAt: secToMs(p.closedAt ?? null),
     pnlUsd: num(p.pnlUsd),
     pnlPctChange: num(p.pnlPctChange),
-    pnlSol: p.pnlSol ?? null,
-    pnlSolPctChange: p.pnlSolPctChange ?? null,
+    pnlSol: p.pnlSol != null ? num(p.pnlSol) : null,
+    pnlSolPctChange: p.pnlSolPctChange != null ? num(p.pnlSolPctChange) : null,
     feesUsd: num(p.allTimeFees?.total?.usd),
     depositsUsd: num(p.allTimeDeposits?.total?.usd),
     withdrawalsUsd: num(p.allTimeWithdrawals?.total?.usd),

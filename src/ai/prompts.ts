@@ -170,7 +170,7 @@ DLMM mechanics:
 is INSIDE the position range.
   - Bounds are absolute USD prices — pin them to real TA levels, not deltas \
 from the current price. Asymmetric bounds (bullish/bearish skew) are encouraged.
-  - The executor converts your prices to bins and enforces width ∈ [5, 2000]. \
+  - The executor converts your prices to bins and enforces width ∈ [5, 343]. \
 If your bounds derive a width outside that band the decision is REJECTED.
 
 Hold vs rebalance heuristics:
@@ -182,7 +182,7 @@ BB expansion) → ROLL with new bounds straddling the new center.
 
 /**
  * Generate pool-specific price-bound exemplars so the LLM picks bounds that
- * derive a sane bin width (∈ [5, 2000]) for THIS pool's bin step. Shows
+ * derive a sane bin width (∈ [5, 343]) for THIS pool's bin step. Shows
  * symmetric bands; the LLM is free to skew bounds asymmetrically.
  */
 function buildPriceBoundExamples(
@@ -193,7 +193,7 @@ function buildPriceBoundExamples(
     return (
       `Price-bound guidance: pick lowerBoundPrice + upperBoundPrice to span a ` +
       `sensible % range given the pool's bin step (pool.binStep, bps). ` +
-      `Narrow ≈ 1–3%, medium ≈ 5–15%, wide ≈ 15–40%. Derived bin width must be in [5, 2000].`
+      `Narrow ≈ 1–3%, medium ≈ 5–15%, wide ≈ 15–40%. Derived bin width must be in [5, 343].`
     );
   }
   const stepFrac = binStep / 10000; // bps → fraction
@@ -215,7 +215,7 @@ function buildPriceBoundExamples(
     ...lines,
     `Bounds are absolute USD prices — pin them to real TA levels (S/R, EMA, swing).`,
     `Asymmetric bounds are encouraged (bullish: skew upper higher; bearish: skew lower lower).`,
-    `Hard constraint: derived bin width must satisfy 5 ≤ width ≤ 2000 — otherwise the decision is REJECTED.`,
+    `Hard constraint: derived bin width must satisfy 5 ≤ width ≤ 343 — otherwise the decision is REJECTED.`,
   ].join("\n");
 }
 

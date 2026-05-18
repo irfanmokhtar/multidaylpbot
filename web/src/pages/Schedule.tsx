@@ -17,9 +17,31 @@ const JOB_DESCRIPTION: Record<string, string> = {
   "position-health": "Read active bin + range; alerts on out-of-range only",
 };
 
+/**
+ * Backend emits either ISO 8601 or an `en-GB` locale string
+ * ("18/05/2026, 08:00:00"). Try ISO first, fall back to parsing en-GB.
+ */
+function parseNextRun(s: string): number | null {
+  const t1 = Date.parse(s);
+  if (Number.isFinite(t1)) return t1;
+  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4}),\s*(\d{2}):(\d{2}):(\d{2})$/);
+  if (!m) return null;
+  const [, dd, mm, yyyy, hh, mi, ss] = m;
+  const t2 = new Date(
+    Number(yyyy),
+    Number(mm) - 1,
+    Number(dd),
+    Number(hh),
+    Number(mi),
+    Number(ss),
+  ).getTime();
+  return Number.isFinite(t2) ? t2 : null;
+}
+
 function fmtNextRun(iso: string | null): { abs: string; rel: string } {
   if (!iso) return { abs: "—", rel: "" };
-  const t = new Date(iso).getTime();
+  const t = parseNextRun(iso);
+  if (t == null) return { abs: iso, rel: "" };
   const sec = Math.max(0, (t - Date.now()) / 1000);
   let rel = "";
   if (sec < 60) rel = `in ${Math.round(sec)}s`;
@@ -29,7 +51,14 @@ function fmtNextRun(iso: string | null): { abs: string; rel: string } {
     const m = Math.round((sec - h * 3600) / 60);
     rel = `in ${h}h ${m}m`;
   } else rel = `in ${Math.floor(sec / 86400)}d`;
-  const abs = new Date(t).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  const abs = new Date(t).toLocaleString(undefined, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
   return { abs, rel };
 }
 
