@@ -599,6 +599,41 @@ async function executeCloseAndReopen(
     // 6b. Wrap native SOL into its WSOL ATA so the chunkable deposit ixs see
     //     a funded user token account. Chunkable creates the ATA itself
     //     (idempotent), but never transfers SOL into it.
+    //
+    //     Re-read native lamports post-create-and-extend: that tx pays rent
+    //     for the new position account + extend reallocs (~28M lamports on a
+    //     94-bin position) out of the same wallet that holds our deposit SOL.
+    //     Wrapping the pre-tx `totalXAmount` would overdraw and fail
+    //     simulation with `Transfer: insufficient lamports`.
+    if (xMint.equals(NATIVE_MINT) && !totalXAmount.isZero()) {
+      const liveX = await readDepositableBalance(xMint, wallet.publicKey, connection);
+      if (liveX.lt(totalXAmount)) {
+        logger.warn(
+          {
+            requestedLamports: totalXAmount.toString(),
+            availableLamports: liveX.toString(),
+            shortfall: totalXAmount.sub(liveX).toString(),
+          },
+          "close-reopen: capping native X deposit to post-rent balance",
+        );
+        totalXAmount = liveX;
+      }
+    }
+    if (yMint.equals(NATIVE_MINT) && !totalYAmount.isZero()) {
+      const liveY = await readDepositableBalance(yMint, wallet.publicKey, connection);
+      if (liveY.lt(totalYAmount)) {
+        logger.warn(
+          {
+            requestedLamports: totalYAmount.toString(),
+            availableLamports: liveY.toString(),
+            shortfall: totalYAmount.sub(liveY).toString(),
+          },
+          "close-reopen: capping native Y deposit to post-rent balance",
+        );
+        totalYAmount = liveY;
+      }
+    }
+
     const wrapIxs: TransactionInstruction[] = [];
     if (xMint.equals(NATIVE_MINT) && !totalXAmount.isZero()) {
       const ataX = getAssociatedTokenAddressSync(NATIVE_MINT, wallet.publicKey);

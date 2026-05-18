@@ -183,10 +183,14 @@ export function renderStatusText(r: StatusReport): string {
     );
     const comp = positionComposition(p, s);
     if (comp) lines.push(row("  Composition", comp, 13));
+    const feeXPct = p.totalX > 0 ? (p.feeX / p.totalX) * 100 : null;
+    const feeYPct = p.totalY > 0 ? (p.feeY / p.totalY) * 100 : null;
+    const feeXPctStr = feeXPct !== null ? ` (${feeXPct.toFixed(2)}%)` : "";
+    const feeYPctStr = feeYPct !== null ? ` (${feeYPct.toFixed(2)}%)` : "";
     lines.push(
       row(
         "  Fees",
-        `${fmtTok(p.feeX)} ${xSym}  +  ${fmtTok(p.feeY)} ${ySym}`,
+        `${fmtTok(p.feeX)} ${xSym}${feeXPctStr}  +  ${fmtTok(p.feeY)} ${ySym}${feeYPctStr}`,
         13,
       ),
     );

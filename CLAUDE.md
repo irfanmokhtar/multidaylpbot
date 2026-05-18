@@ -161,7 +161,7 @@ Set `LLM_PROVIDER=gemini|groq|anthropic|claudecli` and the matching `*_API_KEY`.
 |---|---|
 | `action` | `hold\|rebalance\|claim_fees\|pause` — execution signal |
 | `strategyType` | `Spot\|Curve\|BidAsk` — required when rebalancing. Curve=ranging/mean-reversion, Spot=high vol/breakout, BidAsk=falling knife/catch edges |
-| `lowerBoundPrice` / `upperBoundPrice` | absolute USD floats — required when rebalancing. Executor converts to bin range; derived width must be ∈ [5, 2000] or decision is rejected |
+| `lowerBoundPrice` / `upperBoundPrice` | absolute USD floats — required when rebalancing. Executor converts to bin range; derived width must be ∈ [5, 343] or decision is rejected |
 | `confidence` | 0–1 |
 | `keyLevels` | `{support, resistance}` — optional absolute USD price levels |
 | `headline` | 1–2 sentences, top-line development this cycle |
@@ -172,7 +172,7 @@ Set `LLM_PROVIDER=gemini|groq|anthropic|claudecli` and the matching `*_API_KEY`.
 
 **DLMM verb mapping**: `HOLD→hold`, `ROLL→rebalance` (balanced path), `OPEN→rebalance` (close+reopen), `CLOSE→pause`.
 
-**Price-bound guidance**: system prompt (`buildSystemPrompt()` in `src/ai/prompts.ts`) generates pool-specific price-band exemplars (`$lo – $hi` per width tier) from `binStep` + `activeBinPrice`, plus derived bin counts so the LLM sees tick resolution. The LLM emits `lowerBoundPrice`/`upperBoundPrice` (absolute USD); `priceBoundsToWindow()` in `src/dlmm/strategy.ts` converts via `DLMM.getBinIdFromPrice` (floors lower, ceils upper) and enforces width ∈ [5, 2000] — no silent clamping, decision is rejected on violation.
+**Price-bound guidance**: system prompt (`buildSystemPrompt()` in `src/ai/prompts.ts`) generates pool-specific price-band exemplars (`$lo – $hi` per width tier) from `binStep` + `activeBinPrice`, plus derived bin counts so the LLM sees tick resolution. The LLM emits `lowerBoundPrice`/`upperBoundPrice` (absolute USD); `priceBoundsToWindow()` in `src/dlmm/strategy.ts` converts via `DLMM.getBinIdFromPrice` (floors lower, ceils upper) and enforces width ∈ [`MIN_RANGE_WIDTH`=5, `MAX_RANGE_WIDTH`=343] — no silent clamping, decision is rejected on violation. Cap derived from `DEFAULT_BIN_PER_POSITION` (70) + 3 × `MAX_RESIZE_LENGTH` (91) — Solana tx-size + realloc-CPI ceiling.
 
 ## Rebalance execution paths
 
@@ -184,7 +184,11 @@ Dispatcher in `executeRebalance()` derives `requestedWidth` from price bounds vi
 If either trigger fires, dispatch close+reopen; otherwise balanced re-center.
 
 - **Balanced** (no trigger): `simulateRebalancePositionWithBalancedStrategy` + `rebalancePosition` — re-centers existing position without closing it (1–2 txs). LLM verb: `ROLL`. Cannot change deposit composition.
-- **Close + reopen** (trigger fires): `claimAllRewardsByPosition` → `removeLiquidity(shouldClaimAndClose:true)` → read post-close balances → **Jupiter Ultra swap to target X:Y ratio** → re-read balances → `initializePositionAndAddLiquidityByStrategy` at the LLM's price-bound-derived `{minBinId, maxBinId}` (3+ txs + optional swap). LLM verb: `OPEN`. The window is recomputed against the live active bin at execution time so bound-to-bin mapping is current.
+- **Close + reopen** (trigger fires): `claimAllRewardsByPosition` → `removeLiquidity(shouldClaimAndClose:true)` → read post-close balances → **Jupiter Ultra swap to target X:Y ratio** → re-read balances → reopen at the LLM's price-bound-derived `{minBinId, maxBinId}`. LLM verb: `OPEN`. Reopen has two sub-paths gated on `window.width`:
+  - `width ≤ 70` (`DEFAULT_BIN_PER_POSITION`): single-shot `initializePositionAndAddLiquidityByStrategy` (1 tx, SOL wrap bundled).
+  - `width > 70`: `initializePosition2` + N×`increasePositionLength2` in one create-and-extend tx (each chunk ≤ `MAX_RESIZE_LENGTH`=91 bins), then manual SOL wrap if native, then chunked `addLiquidityByStrategyChunkable` txs (one per 70-bin chunk). Necessary because the single-shot init ix's CPI realloc overruns Solana's 10240-byte inner-realloc cap. Before the wrap step, native deposit amounts (`totalXAmount` / `totalYAmount`) are re-clamped to `readDepositableBalance` so the post-create-and-extend rent deduction (~28M lamports for a 94-bin position) does not cause the wrap-SOL transfer to overdraw and fail simulation with `Transfer: insufficient lamports`.
+
+  Window is recomputed against the live active bin at execution time so bound-to-bin mapping is current.
 
 `previewRebalance()` runs the read-only check before queuing; surfaces `path`, `widthDelta`, derived bin range, `activeBinInside` flag, `targetXWeight`, `currentXWeight`, `compositionDeltaPp`, `pathTrigger`, and any `boundsError`.
 
