@@ -218,7 +218,7 @@ async function hourlyCheckJob(): Promise<void> {
       const balY = await readSpl(snap.tokenY.mint, yDec);
       tokenLines = `  ${xSym}: ${balX.toFixed(4)}  ${ySym}: ${balY.toFixed(4)}`;
 
-      statusHtml = renderStatusHtml(report);
+      statusHtml = renderStatusHtml(report, { withChart: true });
     }
 
     logger.info(

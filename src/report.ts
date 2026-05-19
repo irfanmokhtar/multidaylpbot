@@ -11,6 +11,11 @@ import {
   type PortfolioSnapshot,
   type PositionSummary,
 } from "./dlmm/positions";
+import { renderBinChart } from "./dlmm/binChart";
+
+export interface RenderOpts {
+  withChart?: boolean;
+}
 
 export interface StatusReport {
   snapshot: PortfolioSnapshot;
@@ -133,7 +138,7 @@ function valueUsd(
 
 // ─── plain-text renderer ──────────────────────────────────────────────────────
 
-export function renderStatusText(r: StatusReport): string {
+export function renderStatusText(r: StatusReport, opts?: RenderOpts): string {
   const { snapshot: s, activeBin } = r;
   const xSym = s.tokenX.symbol;
   const ySym = s.tokenY.symbol;
@@ -197,6 +202,13 @@ export function renderStatusText(r: StatusReport): string {
     if (v !== null) {
       lines.push(row("  Value", `≈ ${fmtUsd(v)}`, 13));
     }
+    if (opts?.withChart) {
+      const chart = renderBinChart(p, s);
+      if (chart) {
+        lines.push(``);
+        lines.push(chart);
+      }
+    }
   });
 
   // Totals footer (only if multiple positions or we know the USD value)
@@ -226,8 +238,8 @@ export function renderStatusText(r: StatusReport): string {
 }
 
 /** Telegram HTML rendering — wraps the plain text in <pre> for monospace alignment. */
-export function renderStatusHtml(r: StatusReport): string {
+export function renderStatusHtml(r: StatusReport, opts?: RenderOpts): string {
   const esc = (str: string) =>
     str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  return `<pre>${esc(renderStatusText(r))}</pre>`;
+  return `<pre>${esc(renderStatusText(r, opts))}</pre>`;
 }
