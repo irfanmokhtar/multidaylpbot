@@ -33,12 +33,10 @@ import {
   DEFAULT_BIN_PER_POSITION,
   MAX_RESIZE_LENGTH,
   getTokenBalance,
-  wrapSOLInstruction,
   type LbPosition,
 } from "@meteora-ag/dlmm";
 import {
   NATIVE_MINT,
-  createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
 
@@ -498,16 +496,19 @@ async function executeCloseAndReopen(
 
   // 6. Open the new position.
   //
-  //   width ≤ DEFAULT_BIN_PER_POSITION (70): single tx via SDK helper. The
-  //   init ix's CPI realloc fits within the 10240-byte cap, and SOL wrapping
-  //   is bundled.
+  //   width ≤ DEFAULT_BIN_PER_POSITION (70): single tx via
+  //   initializePositionAndAddLiquidityByStrategy. SDK bundles init,
+  //   bin-array creates, SOL wrap+unwrap, and rebalance ix in one tx.
   //
-  //   71 ≤ width ≤ MAX_RANGE_WIDTH: the helper's single-shot
-  //   `initializePosition` ix overruns Solana's inner-realloc cap, so we
-  //   split: (a) initializePosition2 + N×increasePositionLength2 to grow the
-  //   position to the requested width in one tx, (b) wrap SOL into the WSOL
-  //   ATA if X or Y is native (chunkable deposits don't auto-wrap),
-  //   (c) chunked addLiquidityByStrategyChunkable txs (one per 70-bin chunk).
+  //   71 ≤ width ≤ MAX_RANGE_WIDTH: SDK's single-shot init ix overruns
+  //   Solana's inner-realloc cap, so we split into:
+  //     (a) initializePosition2 + N×increasePositionLength2 to grow the
+  //         position to the requested width in one tx,
+  //     (b) cap native deposit amounts to live post-rent balance,
+  //     (c) addLiquidityByStrategyChunkable txs (one per 70-bin chunk).
+  //         Each chunk tx internally wraps that chunk's native share into
+  //         WSOL ATA, runs rebalanceLiquidity, then closes the ATA. Do NOT
+  //         pre-wrap — would drain native and starve the per-chunk wrap ixs.
   const newPositionKp = Keypair.generate();
   const defaultBinsPerPosition = DEFAULT_BIN_PER_POSITION.toNumber();
   const maxResizeLength = MAX_RESIZE_LENGTH.toNumber();
@@ -596,15 +597,15 @@ async function executeCloseAndReopen(
       ),
     );
 
-    // 6b. Wrap native SOL into its WSOL ATA so the chunkable deposit ixs see
-    //     a funded user token account. Chunkable creates the ATA itself
-    //     (idempotent), but never transfers SOL into it.
-    //
-    //     Re-read native lamports post-create-and-extend: that tx pays rent
-    //     for the new position account + extend reallocs (~28M lamports on a
-    //     94-bin position) out of the same wallet that holds our deposit SOL.
-    //     Wrapping the pre-tx `totalXAmount` would overdraw and fail
-    //     simulation with `Transfer: insufficient lamports`.
+    // 6b. Cap native deposit amounts to live post-create-and-extend balance.
+    //     The init+extend tx pays rent for the new position account + extend
+    //     reallocs (~28M lamports on a 94-bin position) out of the same
+    //     wallet that funds our deposit. If we pass the pre-tx
+    //     totalXAmount/totalYAmount unchanged, the SDK's per-chunk
+    //     wrapSOLInstruction attempts to transfer more native than is left
+    //     and fails with `Transfer: insufficient lamports`.
+    //     readDepositableBalance subtracts SOL_RESERVE_LAMPORTS so fees +
+    //     rent for chunk txs themselves stay funded.
     if (xMint.equals(NATIVE_MINT) && !totalXAmount.isZero()) {
       const liveX = await readDepositableBalance(xMint, wallet.publicKey, connection);
       if (liveX.lt(totalXAmount)) {
@@ -634,46 +635,7 @@ async function executeCloseAndReopen(
       }
     }
 
-    const wrapIxs: TransactionInstruction[] = [];
-    if (xMint.equals(NATIVE_MINT) && !totalXAmount.isZero()) {
-      const ataX = getAssociatedTokenAddressSync(NATIVE_MINT, wallet.publicKey);
-      wrapIxs.push(
-        createAssociatedTokenAccountIdempotentInstruction(
-          wallet.publicKey,
-          ataX,
-          wallet.publicKey,
-          NATIVE_MINT,
-        ),
-        ...wrapSOLInstruction(
-          wallet.publicKey,
-          ataX,
-          BigInt(totalXAmount.toString()),
-        ),
-      );
-    }
-    if (yMint.equals(NATIVE_MINT) && !totalYAmount.isZero()) {
-      const ataY = getAssociatedTokenAddressSync(NATIVE_MINT, wallet.publicKey);
-      wrapIxs.push(
-        createAssociatedTokenAccountIdempotentInstruction(
-          wallet.publicKey,
-          ataY,
-          wallet.publicKey,
-          NATIVE_MINT,
-        ),
-        ...wrapSOLInstruction(
-          wallet.publicKey,
-          ataY,
-          BigInt(totalYAmount.toString()),
-        ),
-      );
-    }
-    if (wrapIxs.length > 0) {
-      signatures.push(
-        await sendIxBundle("wrap-sol", wrapIxs, wallet, connection),
-      );
-    }
-
-    // 6c. Chunked add-liquidity.
+    // 6c. Chunked add-liquidity. SDK wraps+closes WSOL per chunk internally.
     const liquidityTxs = await pool.addLiquidityByStrategyChunkable({
       positionPubKey: newPositionKp.publicKey,
       totalXAmount,
