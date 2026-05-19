@@ -35,16 +35,24 @@ export interface BinWindow {
 }
 
 /**
- * Convert a USD price to its containing binId, using the SDK's static helper.
+ * Convert a human USD price to its containing binId.
+ * SDK's `getBinIdFromPrice` expects a raw Y_atomic/X_atomic ratio, NOT a
+ * human-readable display price. For SOL(9d)/USDC(6d) at $86 the raw ratio is
+ * 0.086 — passing 86 directly yields a binId off by ~17000, which silently
+ * routes deposits to bins the wallet has no liquidity for and the SDK's
+ * per-chunk wSOL wrap comes up short ("Token: insufficient funds").
  * `rounding="floor"` picks the largest binId whose price ≤ target;
  * `rounding="ceil"` picks the smallest binId whose price ≥ target.
  */
 export function priceToBinId(
   price: number,
   binStep: number,
+  xDecimals: number,
+  yDecimals: number,
   rounding: "floor" | "ceil",
 ): number {
-  return DLMM.getBinIdFromPrice(price, binStep, rounding === "floor");
+  const rawPrice = price * Math.pow(10, yDecimals - xDecimals);
+  return DLMM.getBinIdFromPrice(rawPrice, binStep, rounding === "floor");
 }
 
 export interface PriceBoundsWindow extends BinWindow {
@@ -64,6 +72,8 @@ export function priceBoundsToWindow(
   lowerPrice: number,
   upperPrice: number,
   binStep: number,
+  xDecimals: number,
+  yDecimals: number,
   activeBinId: number,
 ): PriceBoundsWindow {
   if (!(lowerPrice > 0 && upperPrice > lowerPrice)) {
@@ -71,8 +81,8 @@ export function priceBoundsToWindow(
       `priceBoundsToWindow: invalid bounds lower=${lowerPrice} upper=${upperPrice}`,
     );
   }
-  const minBinId = priceToBinId(lowerPrice, binStep, "floor");
-  const maxBinId = priceToBinId(upperPrice, binStep, "ceil");
+  const minBinId = priceToBinId(lowerPrice, binStep, xDecimals, yDecimals, "floor");
+  const maxBinId = priceToBinId(upperPrice, binStep, xDecimals, yDecimals, "ceil");
   const width = maxBinId - minBinId + 1;
   if (width < MIN_RANGE_WIDTH || width > MAX_RANGE_WIDTH) {
     throw new Error(

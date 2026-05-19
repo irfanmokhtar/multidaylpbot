@@ -123,6 +123,8 @@ export async function executeRebalance(decision: Decision): Promise<RebalanceExe
     decision.lowerBoundPrice,
     decision.upperBoundPrice,
     pool.lbPair.binStep,
+    pool.tokenX.mint.decimals,
+    pool.tokenY.mint.decimals,
     activeBin.binId,
   );
   const widthDelta = Math.abs(window.width - preWidth);
@@ -399,6 +401,8 @@ async function executeCloseAndReopen(
     decision.lowerBoundPrice!,
     decision.upperBoundPrice!,
     pool.lbPair.binStep,
+    pool.tokenX.mint.decimals,
+    pool.tokenY.mint.decimals,
     liveActive.binId,
   );
   const livePriceStr = liveActive.pricePerToken;
@@ -838,6 +842,8 @@ export async function previewRebalance(decision: Decision): Promise<RebalancePre
         decision.lowerBoundPrice,
         decision.upperBoundPrice,
         pool.lbPair.binStep,
+        pool.tokenX.mint.decimals,
+        pool.tokenY.mint.decimals,
         activeBin.binId,
       );
       requestedBounds = {
