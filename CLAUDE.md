@@ -44,7 +44,8 @@ src/
   rpc.ts             — Connection singleton
   logger.ts          — pino instance
   tokens.ts          — token metadata helpers (isStablecoin, symbol)
-  report.ts          — buildStatusReport() + text/HTML renderers (shared by CLI + Telegram)
+  report.ts          — buildStatusReport() + text/HTML renderers (shared by CLI + Telegram);
+                       text renderer optionally embeds renderBinChart() per position
   indicatorsReport.ts — runIndicatorsPass() + formatIndicatorsText/Html() (shared by CLI + /analyze)
   scheduler.ts       — three node-cron jobs: daily-ta, intraday-ta, position-health
   pnlReport.ts       — buildPnlReport() + formatPnlText/Html() (Meteora-indexed PnL view)
@@ -55,8 +56,11 @@ src/
     positions.ts     — getPortfolioSnapshot() → PortfolioSnapshot
     rebalance.ts     — executeRebalance() dispatcher; balanced + close-reopen paths
                        previewRebalance() / explainPreview() for Telegram proposals
-    strategy.ts      — centerWindow(), clampWidth(), mapStrategyType()
+    strategy.ts      — priceToBinId(), priceBoundsToWindow(), mapStrategyType();
+                       MIN_RANGE_WIDTH=5 / MAX_RANGE_WIDTH=343 constants
     composition.ts   — deriveTargetXWeight() + currentXWeight() for swap sizing
+    binChart.ts      — renderBinChart(): unicode-block per-bin liquidity sparkline
+                       embedded in /status text output
 
   swap/
     jupiter.ts       — Jupiter Ultra v1 client; swapTokensToTargetRatio() orchestrator
@@ -85,7 +89,7 @@ src/
 
   telegram/
     bot.ts           — Telegraf init, single-chat auth guard, notify()
-    commands.ts      — /status /analyze /decide /cancel /pause /resume /sched /help
+    commands.ts      — /status /pnl /analyze /decide /cancel /pause /resume /sched /help
     countdown.ts     — queueRebalance(), cancelPending(), fire() with countdown timer
 
   web/
@@ -172,7 +176,7 @@ Set `LLM_PROVIDER=gemini|groq|anthropic|claudecli` and the matching `*_API_KEY`.
 
 **DLMM verb mapping**: `HOLD→hold`, `ROLL→rebalance` (balanced path), `OPEN→rebalance` (close+reopen), `CLOSE→pause`.
 
-**Price-bound guidance**: system prompt (`buildSystemPrompt()` in `src/ai/prompts.ts`) generates pool-specific price-band exemplars (`$lo – $hi` per width tier) from `binStep` + `activeBinPrice`, plus derived bin counts so the LLM sees tick resolution. The LLM emits `lowerBoundPrice`/`upperBoundPrice` (absolute USD); `priceBoundsToWindow()` in `src/dlmm/strategy.ts` converts via `DLMM.getBinIdFromPrice` (floors lower, ceils upper) and enforces width ∈ [`MIN_RANGE_WIDTH`=5, `MAX_RANGE_WIDTH`=343] — no silent clamping, decision is rejected on violation. Cap derived from `DEFAULT_BIN_PER_POSITION` (70) + 3 × `MAX_RESIZE_LENGTH` (91) — Solana tx-size + realloc-CPI ceiling.
+**Price-bound guidance**: system prompt (`buildSystemPrompt()` in `src/ai/prompts.ts`) generates pool-specific price-band exemplars (`$lo – $hi` per width tier) from `binStep` + `activeBinPrice`, plus derived bin counts so the LLM sees tick resolution. The LLM emits `lowerBoundPrice`/`upperBoundPrice` (absolute USD); `priceBoundsToWindow()` in `src/dlmm/strategy.ts` first normalizes UI price to raw price via `price * 10^(yDec − xDec)`, then calls `DLMM.getBinIdFromPrice` (floors lower, ceils upper) — required for non-9-decimal token pairs. Enforces width ∈ [`MIN_RANGE_WIDTH`=5, `MAX_RANGE_WIDTH`=343] — no silent clamping, decision is rejected on violation. Cap derived from `DEFAULT_BIN_PER_POSITION` (70) + 3 × `MAX_RESIZE_LENGTH` (91) — Solana tx-size + realloc-CPI ceiling.
 
 ## Rebalance execution paths
 
@@ -267,8 +271,6 @@ Optional dashboard config: `DASHBOARD_ENABLED` (default true), `DASHBOARD_PORT` 
 
 Swap layer: `SWAP_ENABLED` (default true), `JUPITER_API_KEY` (optional — free tier works without), `SWAP_SLIPPAGE_BPS` (default 100), `SWAP_MIN_USD` (default 1), `COMPOSITION_SHIFT_THRESHOLD_PCT` (default 10).
 
-Scheduler: `CRON_DAILY` (default `0 8,21 * * *`), `CRON_INTRADAY` (default `0 0,4,12,16 * * *`), `CRON_HEALTH` (default `0 * * * *`), `CRON_TZ` (empty = system local, e.g. `Asia/Kuala_Lumpur`), `SCHEDULER_ENABLED` (default true).
-
-Dashboard: `DASHBOARD_ENABLED` (default true), `DASHBOARD_PORT` (default 3001). Host is hardcoded to `127.0.0.1`.
+Scheduler: `CRON_DAILY` (default `0 8,21 * * *`), `CRON_INTRADAY` (default `0 0,4,12,16 * * *`), `CRON_HEALTH` (default `0 * * * *`), `CRON_TZ` (empty = system local, e.g. `Asia/Kuala_Lumpur`), `SCHEDULER_ENABLED` (default true). Note: `CRON_TZ` is also assigned to `process.env.TZ` at config-load so all subsequent `Date` ops + pino-pretty timestamps render in that zone.
 
 Set `MODE=dryrun` (default) for safe testing — no on-chain execution.

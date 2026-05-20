@@ -82,8 +82,8 @@ export const Decision = z.object({
   headline: z.string().min(10).transform((s) => s.slice(0, 300)),
   /** Mandatory DLMM verdict with verb + 1-line detail. */
   dlmm: DlmmSuggestion,
-  /** ≤1500 char narrative tying signals into a coherent picture. */
-  reasoning: z.string().min(20).max(1500),
+  /** ≤1500 char narrative tying signals into a coherent picture (hard cap 2500 to absorb minor overruns). */
+  reasoning: z.string().min(20).max(2500),
 
   // — rich TA fields — required on daily/ad_hoc by system prompt; optional for intraday —
   /** 3–6 key signals ranked by importance. Omit on intraday cycles to save tokens. */
