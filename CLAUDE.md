@@ -66,7 +66,8 @@ src/
     jupiter.ts       — Jupiter Ultra v1 client; swapTokensToTargetRatio() orchestrator
 
   data/
-    birdeye.ts       — fetchOhlcv({ interval, candles }) with 1.1s throttle + 429 retry
+    birdeye.ts       — fetchOhlcv({ interval, candles }); 1.1s throttle, 429 retry,
+                       multi-key rotation on CU/quota exhaustion (BIRDEYE_API_KEYS)
     indicators.ts    — computeIndicators(candles) → RSI, EMA, BB, MACD, ATR
     meteora_api.ts   — getPool(address); base URL https://dlmm.datapi.meteora.ag
     meteora_pnl.ts   — portfolio/PnL/total_claims/historical fetchers (same host)
@@ -272,5 +273,7 @@ Optional dashboard config: `DASHBOARD_ENABLED` (default true), `DASHBOARD_PORT` 
 Swap layer: `SWAP_ENABLED` (default true), `JUPITER_API_KEY` (optional — free tier works without), `SWAP_SLIPPAGE_BPS` (default 100), `SWAP_MIN_USD` (default 1), `COMPOSITION_SHIFT_THRESHOLD_PCT` (default 10).
 
 Scheduler: `CRON_DAILY` (default `0 8,21 * * *`), `CRON_INTRADAY` (default `0 0,4,12,16 * * *`), `CRON_HEALTH` (default `0 * * * *`), `CRON_TZ` (empty = system local, e.g. `Asia/Kuala_Lumpur`), `SCHEDULER_ENABLED` (default true). Note: `CRON_TZ` is also assigned to `process.env.TZ` at config-load so all subsequent `Date` ops + pino-pretty timestamps render in that zone.
+
+Birdeye OHLCV: `BIRDEYE_API_KEY` (single) or `BIRDEYE_API_KEYS` (comma-separated). When multiple keys are set, the client auto-rotates on 429 or 4xx bodies matching `compute unit | cu limit | rate limit | quota | upgrade your plan` — useful for stretching the free Standard tier's per-key CU budget. `BIRDEYE_API_KEYS` takes precedence.
 
 Set `MODE=dryrun` (default) for safe testing — no on-chain execution.

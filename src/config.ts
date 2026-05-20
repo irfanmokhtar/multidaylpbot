@@ -53,7 +53,10 @@ const Schema = z.object({
   CRON_HEALTH: z.string().default("0 * * * *"),
   CRON_TZ: z.string().optional().default(""), // empty = system local
 
+  // Single key, or comma-separated list to enable rotation on CU-exhaustion.
+  // BIRDEYE_API_KEYS takes precedence when both are set.
   BIRDEYE_API_KEY: z.string().optional().default(""),
+  BIRDEYE_API_KEYS: z.string().optional().default(""),
 
   MAX_DEPLOY_USD: z.coerce.number().positive().default(100),
   COUNTDOWN_SEC: z.coerce.number().int().positive().default(60),
