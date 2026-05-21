@@ -62,6 +62,14 @@ const Schema = z.object({
   COUNTDOWN_SEC: z.coerce.number().int().positive().default(60),
   // Slippage tolerance applied to rebalance tx (active-bin slippage + add-liquidity slippage).
   REBALANCE_SLIPPAGE_PCT: z.coerce.number().positive().max(50).default(1.0),
+  // Bin-count tolerance for active-bin drift between simulation and on-chain execution
+  // of the balanced rebalance path. SDK default is 3; raised to 10 to absorb drift
+  // during the countdown window on volatile pools. Wider = fewer 6004 rejections.
+  MAX_BIN_SLIPPAGE: z.coerce.number().int().positive().max(50).default(10),
+  // Retry attempts on the balanced rebalance path when the on-chain ix rejects with
+  // ExceededBinSlippageTolerance (6004). Each retry re-simulates against a fresh
+  // active bin. 0 = no retry; default 2 = 1 retry after the initial attempt.
+  REBALANCE_MAX_RETRIES: z.coerce.number().int().nonnegative().max(5).default(2),
   // |requestedWidth − currentWidth| ≤ this value → balanced rebalance (re-center, fast).
   // Outside this band → close + reopen at the new width (3+ txs). 0 = always close+reopen.
   WIDTH_CHANGE_TOLERANCE_BINS: z.coerce.number().int().nonnegative().default(5),

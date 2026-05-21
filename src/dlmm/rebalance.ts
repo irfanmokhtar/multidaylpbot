@@ -29,7 +29,6 @@ import {
 } from "@solana/web3.js";
 import { BN } from "@coral-xyz/anchor";
 import {
-  MAX_ACTIVE_BIN_SLIPPAGE,
   DEFAULT_BIN_PER_POSITION,
   MAX_RESIZE_LENGTH,
   getTokenBalance,
@@ -269,7 +268,7 @@ async function executeBalancedRebalance(
   }
 
   const strategy = mapStrategyType(decision.strategyType);
-  const sim = await pool.simulateRebalancePositionWithBalancedStrategy(
+  const sim0 = await pool.simulateRebalancePositionWithBalancedStrategy(
     position.publicKey,
     positionData,
     strategy,
@@ -278,12 +277,12 @@ async function executeBalancedRebalance(
     ZERO_BN,
     ZERO_BN,
   );
-  const binArrayRentLamports = sim.binArrayCost + sim.bitmapExtensionCost;
+  const binArrayRentLamports = sim0.binArrayCost + sim0.bitmapExtensionCost;
 
-  const { initBinArrayInstructions, rebalancePositionInstruction } =
+  const { initBinArrayInstructions, rebalancePositionInstruction: firstRebalanceIxs } =
     await pool.rebalancePosition(
-      sim,
-      new BN(MAX_ACTIVE_BIN_SLIPPAGE),
+      sim0,
+      new BN(cfg.MAX_BIN_SLIPPAGE),
       wallet.publicKey,
       cfg.REBALANCE_SLIPPAGE_PCT,
     );
@@ -299,14 +298,49 @@ async function executeBalancedRebalance(
       ),
     );
   }
-  signatures.push(
-    await sendIxBundle(
-      "rebalance",
-      rebalancePositionInstruction,
-      wallet,
-      connection,
-    ),
-  );
+
+  // Retry-on-6004 (ExceededBinSlippageTolerance): the on-chain ix compares the
+  // active bin captured at sim time vs the live one; drift > MAX_BIN_SLIPPAGE
+  // → reject. Re-simulate against a fresh active bin and resubmit.
+  let rebalanceIxs = firstRebalanceIxs;
+  const maxAttempts = cfg.REBALANCE_MAX_RETRIES + 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      signatures.push(
+        await sendIxBundle("rebalance", rebalanceIxs, wallet, connection),
+      );
+      break;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isBinSlippage =
+        msg.includes("ExceededBinSlippageTolerance") ||
+        msg.includes("0x1774");
+      if (!isBinSlippage || attempt === maxAttempts) {
+        throw err;
+      }
+      const freshActiveBin = (await pool.getActiveBin()).binId;
+      logger.warn(
+        { attempt, maxAttempts, freshActiveBin },
+        "balanced rebalance: bin slippage exceeded — re-simulating and retrying",
+      );
+      const simRetry = await pool.simulateRebalancePositionWithBalancedStrategy(
+        position.publicKey,
+        positionData,
+        strategy,
+        ZERO_BN,
+        ZERO_BN,
+        ZERO_BN,
+        ZERO_BN,
+      );
+      const next = await pool.rebalancePosition(
+        simRetry,
+        new BN(cfg.MAX_BIN_SLIPPAGE),
+        wallet.publicKey,
+        cfg.REBALANCE_SLIPPAGE_PCT,
+      );
+      rebalanceIxs = next.rebalancePositionInstruction;
+    }
+  }
 
   return {
     path: "balanced",
@@ -657,7 +691,7 @@ async function executeCloseAndReopen(
     const maxActiveBinSlippage = getAndCapMaxActiveBinSlippage(
       cfg.REBALANCE_SLIPPAGE_PCT,
       pool.lbPair.binStep,
-      MAX_ACTIVE_BIN_SLIPPAGE,
+      cfg.MAX_BIN_SLIPPAGE,
     );
     const liquidityStrategyParameters = buildLiquidityStrategyParameters(
       totalXAmount,
