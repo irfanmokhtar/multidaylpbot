@@ -33,6 +33,10 @@ import {
   DEFAULT_BIN_PER_POSITION,
   MAX_RESIZE_LENGTH,
   getTokenBalance,
+  chunkDepositWithRebalanceEndpoint,
+  buildLiquidityStrategyParameters,
+  getLiquidityStrategyParameterBuilder,
+  getAndCapMaxActiveBinSlippage,
   type LbPosition,
 } from "@meteora-ag/dlmm";
 import {
@@ -639,19 +643,59 @@ async function executeCloseAndReopen(
       }
     }
 
-    // 6c. Chunked add-liquidity. SDK wraps+closes WSOL per chunk internally.
-    const liquidityTxs = await pool.addLiquidityByStrategyChunkable({
-      positionPubKey: newPositionKp.publicKey,
+    // 6c. Chunked add-liquidity. Call the SDK helper directly in SEQUENTIAL
+    //     mode (isParallel=false) instead of pool.addLiquidityByStrategyChunkable
+    //     (which hardcodes isParallel=true). Sequential mode forces
+    //     shrinkMode=ShrinkBoth per chunk, so on-chain rebalanceLiquidity
+    //     fee/reward processing is constrained to chunk-local bins — it does
+    //     NOT walk into bins funded by earlier chunks. With isParallel=true
+    //     the last chunk uses NoShrinkLeft, walks left into prior chunks'
+    //     bin arrays, and fails with InvalidBinArray (6027) because only the
+    //     current chunk's bin arrays are present in remainingAccounts.
+    //     SDK wraps+closes WSOL and inserts setComputeUnitLimit per chunk.
+    const strategyType = mapStrategyType(decision.strategyType);
+    const maxActiveBinSlippage = getAndCapMaxActiveBinSlippage(
+      cfg.REBALANCE_SLIPPAGE_PCT,
+      pool.lbPair.binStep,
+      MAX_ACTIVE_BIN_SLIPPAGE,
+    );
+    const liquidityStrategyParameters = buildLiquidityStrategyParameters(
       totalXAmount,
       totalYAmount,
-      strategy: {
+      new BN(window.minBinId - pool.lbPair.activeId),
+      new BN(window.maxBinId - pool.lbPair.activeId),
+      new BN(pool.lbPair.binStep),
+      false,
+      new BN(pool.lbPair.activeId),
+      getLiquidityStrategyParameterBuilder(strategyType),
+    );
+    const chunkIxLists = await chunkDepositWithRebalanceEndpoint(
+      pool,
+      {
         minBinId: window.minBinId,
         maxBinId: window.maxBinId,
-        strategyType: mapStrategyType(decision.strategyType),
+        strategyType,
+        singleSidedX: false,
       },
-      user: wallet.publicKey,
-      slippage: cfg.REBALANCE_SLIPPAGE_PCT,
-    });
+      cfg.REBALANCE_SLIPPAGE_PCT,
+      maxActiveBinSlippage,
+      newPositionKp.publicKey,
+      window.minBinId,
+      window.maxBinId,
+      liquidityStrategyParameters,
+      wallet.publicKey,
+      wallet.publicKey,
+      false,
+    );
+    const { blockhash, lastValidBlockHeight } =
+      await connection.getLatestBlockhash();
+    const liquidityTxs = chunkIxLists.map((ixs) =>
+      new Transaction({
+        blockhash,
+        lastValidBlockHeight,
+        feePayer: wallet.publicKey,
+      }).add(...ixs),
+    );
     for (let i = 0; i < liquidityTxs.length; i++) {
       signatures.push(
         await sendBuiltTx(
