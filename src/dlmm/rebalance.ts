@@ -30,7 +30,6 @@ import {
 import { BN } from "@coral-xyz/anchor";
 import {
   DEFAULT_BIN_PER_POSITION,
-  MAX_RESIZE_LENGTH,
   getTokenBalance,
   chunkDepositWithRebalanceEndpoint,
   buildLiquidityStrategyParameters,
@@ -560,16 +559,20 @@ async function executeCloseAndReopen(
   //
   //   71 ≤ width ≤ MAX_RANGE_WIDTH: SDK's single-shot init ix overruns
   //   Solana's inner-realloc cap, so we split into:
-  //     (a) initializePosition2 + N×increasePositionLength2 to grow the
-  //         position to the requested width in one tx,
+  //     (a) initializePosition (v1) at width = DEFAULT_BIN_PER_POSITION
+  //         (chunk-1 width). Do NOT pre-extend via initializePosition2 +
+  //         increasePositionLength2 — that triggers 6027 InvalidBinArray
+  //         on the first chunk's rebalanceLiquidity.
   //     (b) cap native deposit amounts to live post-rent balance,
-  //     (c) addLiquidityByStrategyChunkable txs (one per 70-bin chunk).
-  //         Each chunk tx internally wraps that chunk's native share into
-  //         WSOL ATA, runs rebalanceLiquidity, then closes the ATA. Do NOT
-  //         pre-wrap — would drain native and starve the per-chunk wrap ixs.
+  //     (c) chunkDepositWithRebalanceEndpoint(..., isParallel=false) txs
+  //         (one per 70-bin chunk). Each chunk tx internally wraps that
+  //         chunk's native share into WSOL ATA, runs rebalanceLiquidity,
+  //         then closes the ATA. Do NOT pre-wrap — would drain native and
+  //         starve the per-chunk wrap ixs. Each rebalanceLiquidity ix
+  //         auto-extends the position via inner-realloc as it deposits
+  //         into bins beyond the position's current range.
   const newPositionKp = Keypair.generate();
   const defaultBinsPerPosition = DEFAULT_BIN_PER_POSITION.toNumber();
-  const maxResizeLength = MAX_RESIZE_LENGTH.toNumber();
   const useChunkedReopen = window.width > defaultBinsPerPosition;
 
   if (!useChunkedReopen) {
@@ -594,7 +597,15 @@ async function executeCloseAndReopen(
       ),
     );
   } else {
-    // 6a. init + extend.
+    // 6a. Initialize the position at chunk-1 width only. rebalanceLiquidity
+    //     auto-extends the position via inner-realloc on each subsequent
+    //     chunk's add-liquidity ix (per-chunk realloc <= 70 *
+    //     POSITION_BIN_DATA_SIZE = 7840 bytes, under Solana's 10240-byte
+    //     inner-realloc cap). Pre-extending here via initializePosition2 +
+    //     increasePositionLength2 was the bug behind 6027 InvalidBinArray:
+    //     a pre-extended position forces the on-chain ShrinkBoth path to
+    //     walk bins outside the current chunk and look up bin arrays that
+    //     are not in remainingAccounts.
     const initialWidth = Math.min(window.width, defaultBinsPerPosition);
     type AnchorMethod = (...args: unknown[]) => {
       accountsPartial: (a: Record<string, PublicKey>) => {
@@ -603,12 +614,11 @@ async function executeCloseAndReopen(
     };
     const program = pool.program as unknown as {
       methods: {
-        initializePosition2: AnchorMethod;
-        increasePositionLength2: AnchorMethod;
+        initializePosition: AnchorMethod;
       };
     };
     const initIx = await program.methods
-      .initializePosition2(window.minBinId, initialWidth)
+      .initializePosition(window.minBinId, initialWidth)
       .accountsPartial({
         payer: wallet.publicKey,
         position: newPositionKp.publicKey,
@@ -617,53 +627,33 @@ async function executeCloseAndReopen(
       })
       .instruction();
 
-    const extendIxs: TransactionInstruction[] = [];
-    let currentEndBin = window.minBinId + initialWidth - 1;
-    while (currentEndBin < window.maxBinId) {
-      currentEndBin = Math.min(currentEndBin + maxResizeLength, window.maxBinId);
-      const extIx = await program.methods
-        .increasePositionLength2(currentEndBin)
-        .accountsPartial({
-          funder: wallet.publicKey,
-          lbPair: pool.pubkey,
-          position: newPositionKp.publicKey,
-          owner: wallet.publicKey,
-        })
-        .instruction();
-      extendIxs.push(extIx);
-    }
-
     logger.info(
       {
         position: newPositionKp.publicKey.toBase58(),
         minBinId: window.minBinId,
         maxBinId: window.maxBinId,
-        width: window.width,
+        requestedWidth: window.width,
         initialWidth,
-        extendCount: extendIxs.length,
+        chunkedAutoExtend: window.width > initialWidth,
       },
-      "close-reopen: init+extend position",
+      "close-reopen: init position (chunked add-liq will auto-extend)",
     );
 
     signatures.push(
       await sendIxBundleWithExtraSigners(
-        "create-and-extend-position",
-        [initIx, ...extendIxs],
+        "create-position",
+        [initIx],
         wallet,
         [newPositionKp],
         connection,
       ),
     );
 
-    // 6b. Cap native deposit amounts to live post-create-and-extend balance.
-    //     The init+extend tx pays rent for the new position account + extend
-    //     reallocs (~28M lamports on a 94-bin position) out of the same
-    //     wallet that funds our deposit. If we pass the pre-tx
-    //     totalXAmount/totalYAmount unchanged, the SDK's per-chunk
-    //     wrapSOLInstruction attempts to transfer more native than is left
-    //     and fails with `Transfer: insufficient lamports`.
-    //     readDepositableBalance subtracts SOL_RESERVE_LAMPORTS so fees +
-    //     rent for chunk txs themselves stay funded.
+    // 6b. Cap native deposit amounts to live post-init balance. Rent for the
+    //     freshly-created 70-bin position (~5M lamports) plus per-chunk
+    //     wrap-SOL transfers come out of the same SOL balance.
+    //     readDepositableBalance subtracts SOL_RESERVE_LAMPORTS so fees stay
+    //     funded across all chunks.
     if (xMint.equals(NATIVE_MINT) && !totalXAmount.isZero()) {
       const liveX = await readDepositableBalance(xMint, wallet.publicKey, connection);
       if (liveX.lt(totalXAmount)) {
@@ -694,15 +684,14 @@ async function executeCloseAndReopen(
     }
 
     // 6c. Chunked add-liquidity. Call the SDK helper directly in SEQUENTIAL
-    //     mode (isParallel=false) instead of pool.addLiquidityByStrategyChunkable
-    //     (which hardcodes isParallel=true). Sequential mode forces
-    //     shrinkMode=ShrinkBoth per chunk, so on-chain rebalanceLiquidity
-    //     fee/reward processing is constrained to chunk-local bins — it does
-    //     NOT walk into bins funded by earlier chunks. With isParallel=true
-    //     the last chunk uses NoShrinkLeft, walks left into prior chunks'
-    //     bin arrays, and fails with InvalidBinArray (6027) because only the
-    //     current chunk's bin arrays are present in remainingAccounts.
-    //     SDK wraps+closes WSOL and inserts setComputeUnitLimit per chunk.
+    //     mode (isParallel=false). Each per-chunk rebalanceLiquidity ix
+    //     auto-extends the position via inner-realloc as it deposits into
+    //     bins beyond the position's current range — chunk 1 deposits into
+    //     the position's initial [minBinId, minBinId+69] range; chunk 2
+    //     resizes the position to add chunk 2's range; chunk 3 likewise.
+    //     This relies on the position NOT being pre-extended (step 6a uses
+    //     v1 initializePosition at chunk-1 width). SDK wraps+closes WSOL
+    //     and inserts setComputeUnitLimit per chunk.
     const strategyType = mapStrategyType(decision.strategyType);
     const maxActiveBinSlippage = getAndCapMaxActiveBinSlippage(
       cfg.REBALANCE_SLIPPAGE_PCT,
