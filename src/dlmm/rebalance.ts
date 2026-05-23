@@ -300,9 +300,12 @@ async function executeBalancedRebalance(
   }
 
   // Retry-on-6004 (ExceededBinSlippageTolerance): the on-chain ix compares the
-  // active bin captured at sim time vs the live one; drift > MAX_BIN_SLIPPAGE
-  // → reject. Re-simulate against a fresh active bin and resubmit.
+  // active bin captured at sim time vs the live one; drift > slippage → reject.
+  // Each retry: short backoff so flash drift can settle, fetch fresh active bin,
+  // re-simulate, rebuild the ix with widened slippage (×2, ×3, capped at 50).
   let rebalanceIxs = firstRebalanceIxs;
+  let activeBinAtBuild = activeBinId;
+  const baseSlippage = cfg.MAX_BIN_SLIPPAGE;
   const maxAttempts = cfg.REBALANCE_MAX_RETRIES + 1;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -318,10 +321,22 @@ async function executeBalancedRebalance(
       if (!isBinSlippage || attempt === maxAttempts) {
         throw err;
       }
+      await new Promise((r) => setTimeout(r, 750));
       const freshActiveBin = (await pool.getActiveBin()).binId;
+      const observedDrift = Math.abs(freshActiveBin - activeBinAtBuild);
+      const previousSlippage = Math.min(50, baseSlippage * attempt);
+      const nextSlippage = Math.min(50, baseSlippage * (attempt + 1));
       logger.warn(
-        { attempt, maxAttempts, freshActiveBin },
-        "balanced rebalance: bin slippage exceeded — re-simulating and retrying",
+        {
+          attempt,
+          maxAttempts,
+          activeBinAtBuild,
+          freshActiveBin,
+          observedDrift,
+          previousSlippage,
+          nextSlippage,
+        },
+        "balanced rebalance: bin slippage exceeded — re-simulating with widened tolerance",
       );
       const simRetry = await pool.simulateRebalancePositionWithBalancedStrategy(
         position.publicKey,
@@ -334,11 +349,12 @@ async function executeBalancedRebalance(
       );
       const next = await pool.rebalancePosition(
         simRetry,
-        new BN(cfg.MAX_BIN_SLIPPAGE),
+        new BN(nextSlippage),
         wallet.publicKey,
         cfg.REBALANCE_SLIPPAGE_PCT,
       );
       rebalanceIxs = next.rebalancePositionInstruction;
+      activeBinAtBuild = freshActiveBin;
     }
   }
 

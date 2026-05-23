@@ -249,8 +249,8 @@ Pause/resume via `/pause` and `/resume` Telegram commands, or `setPaused()` from
 - Single Telegram `CHAT_ID` allowlist in `src/telegram/bot.ts`
 - `MAX_DEPLOY_USD` cap on close+reopen path — scales down deposit if post-close balance would exceed it
 - `REBALANCE_SLIPPAGE_PCT` — slippage tolerance on rebalance txs (default 1%)
-- `MAX_BIN_SLIPPAGE` — bin-count tolerance for active-bin drift between sim and on-chain execution (default 10; SDK default is 3). Wider absorbs drift during countdown on volatile pools but lets execution run farther from sim conditions.
-- `REBALANCE_MAX_RETRIES` — balanced-path retries on `ExceededBinSlippageTolerance` (6004); each retry re-simulates against a fresh active bin (default 2 → 1 retry)
+- `MAX_BIN_SLIPPAGE` — base bin-count tolerance for active-bin drift between sim and on-chain execution (default 15; SDK default is 3). Retries on the balanced path escalate this ×2 then ×3 (capped at the schema max of 50), so the second/third attempts widen the on-chain check.
+- `REBALANCE_MAX_RETRIES` — balanced-path retries on `ExceededBinSlippageTolerance` (6004); each retry sleeps 750ms, re-simulates against a fresh active bin, and rebuilds the ix with widened slippage (default 2 → 2 retries after the initial attempt)
 - `WIDTH_CHANGE_TOLERANCE_BINS` — controls balanced vs close+reopen dispatch (default 5)
 - `SOL_RESERVE_LAMPORTS` (50_000_000 = 0.05 SOL) — always held back from SOL balance before redeposit
 
@@ -274,7 +274,7 @@ Optional dashboard config: `DASHBOARD_ENABLED` (default true), `DASHBOARD_PORT` 
 
 Swap layer: `SWAP_ENABLED` (default true), `JUPITER_API_KEY` (optional — free tier works without), `SWAP_SLIPPAGE_BPS` (default 100), `SWAP_MIN_USD` (default 1), `COMPOSITION_SHIFT_THRESHOLD_PCT` (default 10).
 
-Rebalance resilience: `MAX_BIN_SLIPPAGE` (default 10) caps active-bin drift between sim and execution; `REBALANCE_MAX_RETRIES` (default 2) re-simulates and resubmits the balanced path on error 6004.
+Rebalance resilience: `MAX_BIN_SLIPPAGE` (default 15) is the base active-bin drift tolerance; retries escalate it ×2 / ×3 (cap 50). `REBALANCE_MAX_RETRIES` (default 2) sleeps 750ms between attempts, re-simulates, and rebuilds the ix with the widened slippage on error 6004.
 
 Scheduler: `CRON_DAILY` (default `0 8,21 * * *`), `CRON_INTRADAY` (default `0 0,4,12,16 * * *`), `CRON_HEALTH` (default `0 * * * *`), `CRON_TZ` (empty = system local, e.g. `Asia/Kuala_Lumpur`), `SCHEDULER_ENABLED` (default true). Note: `CRON_TZ` is also assigned to `process.env.TZ` at config-load so all subsequent `Date` ops + pino-pretty timestamps render in that zone.
 
