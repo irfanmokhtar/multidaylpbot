@@ -59,6 +59,7 @@ const Schema = z.object({
   BIRDEYE_API_KEYS: z.string().optional().default(""),
 
   MAX_DEPLOY_USD: z.coerce.number().positive().default(100),
+  // Unused — execution is now immediate. Kept for back-compat with existing .env files.
   COUNTDOWN_SEC: z.coerce.number().int().positive().default(60),
   // Slippage tolerance applied to rebalance tx (active-bin slippage + add-liquidity slippage).
   REBALANCE_SLIPPAGE_PCT: z.coerce.number().positive().max(50).default(1.0),
