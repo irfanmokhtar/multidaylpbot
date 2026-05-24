@@ -23,6 +23,7 @@ import {
   ComputeBudgetProgram,
   Keypair,
   PublicKey,
+  SYSVAR_RENT_PUBKEY,
   Transaction,
   TransactionInstruction,
   sendAndConfirmTransaction,
@@ -624,6 +625,11 @@ async function executeCloseAndReopen(
         position: newPositionKp.publicKey,
         lbPair: pool.pubkey,
         owner: wallet.publicKey,
+        // `rent` sysvar has no fixed address / PDA in the IDL, so Anchor can't
+        // auto-resolve it — must be passed explicitly or the ix build throws
+        // "Account `rent` not provided." (systemProgram/eventAuthority/program
+        // still auto-resolve from their address/pda/programId.)
+        rent: SYSVAR_RENT_PUBKEY,
       })
       .instruction();
 
