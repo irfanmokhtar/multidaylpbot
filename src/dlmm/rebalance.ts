@@ -103,6 +103,14 @@ export async function executeRebalance(decision: Decision): Promise<RebalanceExe
   const pool = await getDlmmPool();
   const wallet = loadWallet();
 
+  // The pool object is a boot-time singleton (getDlmmPool caches DLMM.create).
+  // getActiveBin() reads activeId fresh but does NOT sync pool.lbPair.activeId
+  // / bitmap / clock. The chunked deposit endpoint derives delta-ids, the ix
+  // activeId arg, and bin-array coverage from pool.lbPair — if stale, the
+  // RebalanceLiquidity ix references a bin array that disagrees with chain
+  // state → 6027 InvalidBinArray. Refresh before any bin math.
+  await pool.refetchStates();
+
   const { activeBin, userPositions } = await pool.getPositionsByUserAndLbPair(
     wallet.publicKey,
   );
@@ -666,15 +674,19 @@ async function executeCloseAndReopen(
       }
     }
 
-    // 6c. Chunked add-liquidity. Call the SDK helper directly in SEQUENTIAL
-    //     mode (isParallel=false). Each per-chunk rebalanceLiquidity ix
-    //     auto-extends the position via inner-realloc as it deposits into
-    //     bins beyond the position's current range — chunk 1 deposits into
-    //     the position's initial [minBinId, minBinId+69] range; chunk 2
-    //     resizes the position to add chunk 2's range; chunk 3 likewise.
-    //     This relies on the position NOT being pre-extended (step 6a uses
-    //     v1 initializePosition at chunk-1 width). SDK wraps+closes WSOL
-    //     and inserts setComputeUnitLimit per chunk.
+    // 6c. Chunked add-liquidity into the (already full-width, empty) position
+    //     created in 6a. Call the SDK helper directly in SEQUENTIAL mode
+    //     (isParallel=false → shrinkMode=ShrinkBoth); this is the same flow a
+    //     known-working on-chain position used. SDK wraps+closes WSOL and
+    //     inserts setComputeUnitLimit per chunk.
+    //
+    //     The delta-ids, the ix activeId arg, and bin-array coverage are all
+    //     derived from pool.lbPair.activeId + bitmap below. createExtendedEmptyPosition
+    //     and the Jupiter swap took time, so re-sync pool state to the live
+    //     active bin first — a stale activeId here is what produced the
+    //     RebalanceLiquidity 6027 InvalidBinArray (delta-ids/bin-arrays
+    //     disagreeing with the position's fresh range and chain state).
+    await pool.refetchStates();
     const strategyType = mapStrategyType(decision.strategyType);
     const maxActiveBinSlippage = getAndCapMaxActiveBinSlippage(
       cfg.REBALANCE_SLIPPAGE_PCT,
