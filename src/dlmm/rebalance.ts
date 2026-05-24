@@ -23,7 +23,6 @@ import {
   ComputeBudgetProgram,
   Keypair,
   PublicKey,
-  SYSVAR_RENT_PUBKEY,
   Transaction,
   TransactionInstruction,
   sendAndConfirmTransaction,
@@ -379,7 +378,7 @@ async function executeBalancedRebalance(
 async function executeCloseAndReopen(
   decision: Decision,
   position: LbPosition,
-  activeBinId: number,
+  _activeBinId: number,
   _initialWindow: PriceBoundsWindow,
 ): Promise<RebalanceExecution> {
   const cfg = loadConfig();
@@ -598,40 +597,21 @@ async function executeCloseAndReopen(
       ),
     );
   } else {
-    // 6a. Initialize the position at chunk-1 width only. rebalanceLiquidity
-    //     auto-extends the position via inner-realloc on each subsequent
-    //     chunk's add-liquidity ix (per-chunk realloc <= 70 *
-    //     POSITION_BIN_DATA_SIZE = 7840 bytes, under Solana's 10240-byte
-    //     inner-realloc cap). Pre-extending here via initializePosition2 +
-    //     increasePositionLength2 was the bug behind 6027 InvalidBinArray:
-    //     a pre-extended position forces the on-chain ShrinkBoth path to
-    //     walk bins outside the current chunk and look up bin arrays that
-    //     are not in remainingAccounts.
-    const initialWidth = Math.min(window.width, defaultBinsPerPosition);
-    type AnchorMethod = (...args: unknown[]) => {
-      accountsPartial: (a: Record<string, PublicKey>) => {
-        instruction: () => Promise<TransactionInstruction>;
-      };
-    };
-    const program = pool.program as unknown as {
-      methods: {
-        initializePosition: AnchorMethod;
-      };
-    };
-    const initIx = await program.methods
-      .initializePosition(window.minBinId, initialWidth)
-      .accountsPartial({
-        payer: wallet.publicKey,
-        position: newPositionKp.publicKey,
-        lbPair: pool.pubkey,
-        owner: wallet.publicKey,
-        // `rent` sysvar has no fixed address / PDA in the IDL, so Anchor can't
-        // auto-resolve it — must be passed explicitly or the ix build throws
-        // "Account `rent` not provided." (systemProgram/eventAuthority/program
-        // still auto-resolve from their address/pda/programId.)
-        rent: SYSVAR_RENT_PUBKEY,
-      })
-      .instruction();
+    // 6a. Create the new position at FULL width up front via the SDK's
+    //     purpose-built createExtendedEmptyPosition (one tx). It returns an
+    //     EMPTY position (zero liquidity), so the on-chain ShrinkBoth walk has
+    //     no occupied bins outside a chunk to trip on — sidestepping the 6027
+    //     InvalidBinArray that the old initializePosition2 + increasePositionLength2
+    //     pre-extend hit (that path pre-extended a position that then deposited
+    //     and forced ShrinkBoth over bin arrays not in remainingAccounts).
+    //     Chunked add-liquidity (6c) then fills the bins. Matches the proven
+    //     dlmm-position-manager flow.
+    const initTx = await pool.createExtendedEmptyPosition(
+      window.minBinId,
+      window.maxBinId,
+      newPositionKp.publicKey,
+      wallet.publicKey,
+    );
 
     logger.info(
       {
@@ -639,18 +619,15 @@ async function executeCloseAndReopen(
         minBinId: window.minBinId,
         maxBinId: window.maxBinId,
         requestedWidth: window.width,
-        initialWidth,
-        chunkedAutoExtend: window.width > initialWidth,
       },
-      "close-reopen: init position (chunked add-liq will auto-extend)",
+      "close-reopen: create extended empty position (full width)",
     );
 
     signatures.push(
-      await sendIxBundleWithExtraSigners(
+      await sendBuiltTx(
         "create-position",
-        [initIx],
-        wallet,
-        [newPositionKp],
+        initTx,
+        [wallet, newPositionKp],
         connection,
       ),
     );
