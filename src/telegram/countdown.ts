@@ -1,13 +1,13 @@
 /**
- * Notify-then-execute countdown for rebalance proposals.
+ * Immediate-execution rebalance dispatcher.
  *
- * One pending proposal at a time. queueRebalance() posts the proposal to
- * Telegram, arms a timer for COUNTDOWN_SEC, and either executes on timeout or
- * aborts on cancelPending(). New proposals while one is in-flight are rejected
- * — the user must /cancel or wait.
+ * queueRebalance() posts the proposal to Telegram and executes inline — no
+ * timer, no /cancel window. Earlier versions armed a COUNTDOWN_SEC delay, but
+ * the active bin drifts on volatile pools during the wait, causing bin-
+ * slippage errors at submit time. Now: decide → notify → execute.
  *
- * State lives in module scope (per PLAN.md "in-memory pending-action map");
- * a process restart drops any pending action, which is fine because the
+ * A module-scope `executing` flag prevents overlapping scheduler ticks from
+ * double-firing. A process restart drops the flag, which is fine — the
  * scheduler will re-propose on the next cycle if conditions still warrant it.
  */
 
@@ -22,17 +22,7 @@ import {
 import type { Decision } from "../ai/types";
 import { getBot, notify } from "./bot";
 
-interface PendingRebalance {
-  id: string;
-  decision: Decision;
-  proposedAt: number;
-  expiresAt: number;
-  timer: NodeJS.Timeout;
-  /** Free-text label for the trigger (e.g. "daily-ta", "intraday-ta"). */
-  source: string;
-}
-
-let pending: PendingRebalance | null = null;
+let executing: { id: string; source: string } | null = null;
 
 // ─── approval gate (for /decide-triggered proposals) ─────────────────────────
 
@@ -61,7 +51,7 @@ export async function proposeForApproval(
   decision: Decision,
   source: string,
 ): Promise<ProposeResult> {
-  if (pending) return { ok: false, reason: "already_pending" };
+  if (executing) return { ok: false, reason: "already_executing" };
   if (pendingApproval) return { ok: false, reason: "already_pending_approval" };
   if (decision.action !== "rebalance") return { ok: false, reason: "not_a_rebalance_decision" };
 
@@ -89,7 +79,7 @@ export async function proposeForApproval(
     `<pre>${escapeHtml(previewBlock)}</pre>\n` +
     headlineBlock +
     `<i>${escapeHtml(decision.reasoning)}</i>\n\n` +
-    `Approve to arm a ${cfg.COUNTDOWN_SEC}s countdown.`;
+    `Approve to execute immediately.`;
 
   try {
     const bot = getBot();
@@ -127,7 +117,7 @@ export async function approveApproval(id: string): Promise<{ ok: boolean; reason
   const result = await queueRebalance(decision, source);
   if (!result.ok) {
     await bot.telegram
-      .sendMessage(chatId, `⚠️ Could not arm rebalance: ${result.reason ?? "unknown"}`)
+      .sendMessage(chatId, `⚠️ Could not execute rebalance: ${result.reason ?? "unknown"}`)
       .catch(() => {});
   }
   return result.ok ? { ok: true } : { ok: false, reason: result.reason };
@@ -150,51 +140,38 @@ export function rejectApproval(id: string): { ok: boolean; reason?: string } {
 export function getPendingRebalance(): {
   id: string;
   source: string;
-  expiresAt: number;
-  msUntilExecute: number;
 } | null {
-  if (!pending) return null;
-  return {
-    id: pending.id,
-    source: pending.source,
-    expiresAt: pending.expiresAt,
-    msUntilExecute: Math.max(0, pending.expiresAt - Date.now()),
-  };
+  return executing ? { id: executing.id, source: executing.source } : null;
 }
 
 export interface QueueResult {
   ok: boolean;
-  /** Set when ok=false; e.g. "already_pending" or "no_position". */
+  /** Set when ok=false; e.g. "already_executing" or "no_position". */
   reason?: string;
   id?: string;
-  expiresAt?: number;
 }
 
 export async function queueRebalance(
   decision: Decision,
   source: string,
 ): Promise<QueueResult> {
-  if (pending) {
-    return { ok: false, reason: "already_pending" };
+  if (executing) {
+    return { ok: false, reason: "already_executing" };
   }
   if (decision.action !== "rebalance") {
     return { ok: false, reason: "not_a_rebalance_decision" };
   }
 
-  const cfg = loadConfig();
-  const countdownSec = cfg.COUNTDOWN_SEC;
   const id = String(Date.now());
-  const proposedAt = Date.now();
-  const expiresAt = proposedAt + countdownSec * 1000;
 
-  // Pre-flight preview (read-only) so the user sees concrete numbers in the
-  // proposal. If this fails we still arm the timer — the executor will surface
-  // the underlying error at fire time.
+  // Pre-flight preview (read-only) so the user sees concrete numbers before
+  // the tx submits. If preview fails we still proceed — the executor will
+  // surface the underlying error.
   let previewBlock = "(preview unavailable)";
   try {
     const preview = await previewRebalance(decision);
     if (!preview.positionAddress) {
-      logger.warn("queueRebalance: no on-chain position — refusing to queue");
+      logger.warn("queueRebalance: no on-chain position — refusing to execute");
       return { ok: false, reason: "no_position" };
     }
     previewBlock = explainPreview(preview);
@@ -205,13 +182,7 @@ export async function queueRebalance(
     );
   }
 
-  // Arm the timer first, then notify. If the notify throws we still want a
-  // valid pending state so the user can /cancel via the next message.
-  const timer = setTimeout(() => {
-    void fire(id);
-  }, countdownSec * 1000);
-
-  pending = { id, decision, proposedAt, expiresAt, timer, source };
+  executing = { id, source };
 
   const dlmmVerb = decision.dlmm?.verb ?? "ROLL";
   const head =
@@ -225,7 +196,7 @@ export async function queueRebalance(
     `<pre>${escapeHtml(previewBlock)}</pre>\n` +
     headlineBlock +
     `<i>${escapeHtml(decision.reasoning)}</i>\n\n` +
-    `Executes in <b>${countdownSec}s</b> unless you send /cancel.`;
+    `Executing now.`;
 
   try {
     await notify(head + body, { html: true });
@@ -236,7 +207,13 @@ export async function queueRebalance(
     );
   }
 
-  return { ok: true, id, expiresAt };
+  try {
+    await fire(decision, id);
+  } finally {
+    executing = null;
+  }
+
+  return { ok: true, id };
 }
 
 export interface CancelResult {
@@ -246,33 +223,22 @@ export interface CancelResult {
   cancelledId?: string;
 }
 
-export function cancelPending(reason = "user requested"): CancelResult {
-  if (!pending) return { ok: false, reason: "no_pending" };
-  const id = pending.id;
-  clearTimeout(pending.timer);
-  pending = null;
-  logger.info({ id, reason }, "rebalance proposal cancelled");
-  void notify(`🛑 Pending rebalance cancelled (${reason}).`).catch(() => {});
-  return { ok: true, cancelledId: id };
+/**
+ * Back-compat no-op. Execution is now synchronous, so by the time /cancel
+ * lands the tx is already in flight or done. The export remains so callers
+ * compile, but it always returns no_pending.
+ */
+export function cancelPending(_reason = "user requested"): CancelResult {
+  return { ok: false, reason: "no_pending" };
 }
 
-async function fire(id: string): Promise<void> {
-  // Detach pending atomically so a late /cancel can't race us.
-  if (!pending || pending.id !== id) {
-    logger.debug({ id }, "fire: pending mismatch, skipping");
-    return;
-  }
-  const job = pending;
-  pending = null;
-
-  logger.info({ id }, "rebalance: countdown elapsed, executing");
-  await notify("⚙️ Countdown elapsed — submitting rebalance tx now.").catch(
-    () => {},
-  );
+async function fire(decision: Decision, id: string): Promise<void> {
+  logger.info({ id }, "rebalance: submitting tx");
+  await notify("⚙️ Submitting rebalance tx now.").catch(() => {});
 
   let result: RebalanceExecution;
   try {
-    result = await executeRebalance(job.decision);
+    result = await executeRebalance(decision);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error({ id, err: msg }, "rebalance execution failed");

@@ -191,7 +191,9 @@ If either trigger fires, dispatch close+reopen; otherwise balanced re-center.
 - **Balanced** (no trigger): `simulateRebalancePositionWithBalancedStrategy` + `rebalancePosition` — re-centers existing position without closing it (1–2 txs). LLM verb: `ROLL`. Cannot change deposit composition.
 - **Close + reopen** (trigger fires): `claimAllRewardsByPosition` → `removeLiquidity(shouldClaimAndClose:true)` → read post-close balances → **Jupiter Ultra swap to target X:Y ratio** → re-read balances → reopen at the LLM's price-bound-derived `{minBinId, maxBinId}`. LLM verb: `OPEN`. Reopen has two sub-paths gated on `window.width`:
   - `width ≤ 70` (`DEFAULT_BIN_PER_POSITION`): single-shot `initializePositionAndAddLiquidityByStrategy` (1 tx, SOL wrap bundled).
-  - `width > 70`: `initializePosition2` + N×`increasePositionLength2` in one create-and-extend tx (each chunk ≤ `MAX_RESIZE_LENGTH`=91 bins), then manual SOL wrap if native, then chunked `addLiquidityByStrategyChunkable` txs (one per 70-bin chunk). Necessary because the single-shot init ix's CPI realloc overruns Solana's 10240-byte inner-realloc cap. Before the wrap step, native deposit amounts (`totalXAmount` / `totalYAmount`) are re-clamped to `readDepositableBalance` so the post-create-and-extend rent deduction (~28M lamports for a 94-bin position) does not cause the wrap-SOL transfer to overdraw and fail simulation with `Transfer: insufficient lamports`.
+  - `width > 70`: `createExtendedEmptyPosition(minBinId, maxBinId)` (SDK emits `InitializePosition` at width 70 + `IncreasePositionLength` to full width — one tx, empty position), then chunked add-liquidity txs (one per 70-bin chunk) built by calling the SDK helper `chunkDepositWithRebalanceEndpoint(..., isParallel=false)` directly. Each per-chunk `rebalanceLiquidity` ix deposits into the pre-extended position's bins (`isParallel=false` → `shrinkMode=ShrinkBoth`; this matches a known-working on-chain position and processes only the chunk's own bin arrays). Before the chunk loop, native deposit amounts (`totalXAmount` / `totalYAmount`) are re-clamped to `readDepositableBalance` so the post-rent deduction does not cause the per-chunk wrap-SOL transfer to overdraw and fail simulation with `Transfer: insufficient lamports`.
+
+  **Stale-pool-state gotcha → 6027**: the chunk-deposit delta-ids, the `rebalanceLiquidity` `activeId` arg, and bin-array coverage are all derived from the cached `pool.lbPair.activeId` + bitmap. `getDlmmPool()` returns a boot-time singleton and `getActiveBin()` reads activeId fresh but does NOT sync `pool.lbPair`. If `pool.lbPair.activeId` is stale, the deposit references a bin array that disagrees with the position's fresh range / chain state → `RebalanceLiquidity` "process claim fee and reward" fails with `InvalidBinArray` (6027). Fix: `executeRebalance()` calls `await pool.refetchStates()` at the top, and `executeCloseAndReopen()` calls it again immediately before the width>70 deposit (after `createExtendedEmptyPosition` + the Jupiter swap, which let the active bin drift). `refetchStates()` re-syncs `lbPair` (incl. activeId), bin-array bitmap, reserves, and clock.
 
   Window is recomputed against the live active bin at execution time so bound-to-bin mapping is current.
 
@@ -249,6 +251,8 @@ Pause/resume via `/pause` and `/resume` Telegram commands, or `setPaused()` from
 - Single Telegram `CHAT_ID` allowlist in `src/telegram/bot.ts`
 - `MAX_DEPLOY_USD` cap on close+reopen path — scales down deposit if post-close balance would exceed it
 - `REBALANCE_SLIPPAGE_PCT` — slippage tolerance on rebalance txs (default 1%)
+- `MAX_BIN_SLIPPAGE` — base bin-count tolerance for active-bin drift between sim and on-chain execution (default 15; SDK default is 3). Retries on the balanced path escalate this ×2 then ×3 (capped at the schema max of 50), so the second/third attempts widen the on-chain check.
+- `REBALANCE_MAX_RETRIES` — balanced-path retries on `ExceededBinSlippageTolerance` (6004); each retry sleeps 750ms, re-simulates against a fresh active bin, and rebuilds the ix with widened slippage (default 2 → 2 retries after the initial attempt)
 - `WIDTH_CHANGE_TOLERANCE_BINS` — controls balanced vs close+reopen dispatch (default 5)
 - `SOL_RESERVE_LAMPORTS` (50_000_000 = 0.05 SOL) — always held back from SOL balance before redeposit
 
@@ -271,6 +275,8 @@ RPC_URL, WALLET_PRIVATE_KEY, POOL_ADDRESS, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 Optional dashboard config: `DASHBOARD_ENABLED` (default true), `DASHBOARD_PORT` (default 3001). Host is hardcoded to `127.0.0.1`.
 
 Swap layer: `SWAP_ENABLED` (default true), `JUPITER_API_KEY` (optional — free tier works without), `SWAP_SLIPPAGE_BPS` (default 100), `SWAP_MIN_USD` (default 1), `COMPOSITION_SHIFT_THRESHOLD_PCT` (default 10).
+
+Rebalance resilience: `MAX_BIN_SLIPPAGE` (default 15) is the base active-bin drift tolerance; retries escalate it ×2 / ×3 (cap 50). `REBALANCE_MAX_RETRIES` (default 2) sleeps 750ms between attempts, re-simulates, and rebuilds the ix with the widened slippage on error 6004.
 
 Scheduler: `CRON_DAILY` (default `0 8,21 * * *`), `CRON_INTRADAY` (default `0 0,4,12,16 * * *`), `CRON_HEALTH` (default `0 * * * *`), `CRON_TZ` (empty = system local, e.g. `Asia/Kuala_Lumpur`), `SCHEDULER_ENABLED` (default true). Note: `CRON_TZ` is also assigned to `process.env.TZ` at config-load so all subsequent `Date` ops + pino-pretty timestamps render in that zone.
 

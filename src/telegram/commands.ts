@@ -29,7 +29,7 @@ const HELP_TEXT = `<b>multidaylpbot</b> — Meteora DLMM SOL/USDC manager
 /pnl      — fees collected + total USD PnL vs cost basis (via Meteora indexer)
 /analyze  — raw indicator pass (OHLCV + RSI/EMA/BB/MACD/ATR; no LLM)
 /decide   — full analyzer pass + approval prompt when rebalance recommended (MODE=live)
-/cancel   — abort a pending rebalance during its countdown
+/cancel   — no-op (execution is immediate; kept for back-compat)
 /pause    — pause the scheduler (no auto TA / health checks)
 /resume   — resume the scheduler
 /sched    — show scheduler state + next run times
@@ -130,16 +130,8 @@ export function registerCommands(bot: Telegraf): void {
   });
 
   bot.command("cancel", async (ctx) => {
-    const before = getPendingRebalance();
-    const result = cancelPending("user /cancel");
-    if (!result.ok) {
-      await ctx.reply("👌 No pending rebalance to cancel.");
-      return;
-    }
-    const remaining = before ? Math.round(before.msUntilExecute / 1000) : 0;
-    await ctx.reply(
-      `🛑 Cancelled pending rebalance (${remaining}s remained on the timer).`,
-    );
+    cancelPending("user /cancel");
+    await ctx.reply("👌 No pending rebalance to cancel.");
   });
 
   // /analyze — raw indicator pass. No LLM, no on-chain reads. Mirrors the

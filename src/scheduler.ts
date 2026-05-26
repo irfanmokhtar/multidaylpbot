@@ -160,12 +160,10 @@ async function maybeQueueRebalance(
   if (existing) {
     logger.warn(
       { existingId: existing.id, source },
-      "rebalance recommended but a proposal is already pending — skipping",
+      "rebalance recommended but one is already executing — skipping",
     );
     await notify(
-      `⏭ Skipping new rebalance proposal — one is already pending ` +
-        `(${Math.round(existing.msUntilExecute / 1000)}s left). ` +
-        `Send /cancel to abort it, then re-trigger via /decide if needed.`,
+      `⏭ Skipping new rebalance proposal — one is already executing.`,
     ).catch(() => {});
     return;
   }

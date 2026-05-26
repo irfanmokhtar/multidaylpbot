@@ -29,10 +29,12 @@ import {
 } from "@solana/web3.js";
 import { BN } from "@coral-xyz/anchor";
 import {
-  MAX_ACTIVE_BIN_SLIPPAGE,
   DEFAULT_BIN_PER_POSITION,
-  MAX_RESIZE_LENGTH,
   getTokenBalance,
+  chunkDepositWithRebalanceEndpoint,
+  buildLiquidityStrategyParameters,
+  getLiquidityStrategyParameterBuilder,
+  getAndCapMaxActiveBinSlippage,
   type LbPosition,
 } from "@meteora-ag/dlmm";
 import {
@@ -100,6 +102,14 @@ export async function executeRebalance(decision: Decision): Promise<RebalanceExe
   const cfg = loadConfig();
   const pool = await getDlmmPool();
   const wallet = loadWallet();
+
+  // The pool object is a boot-time singleton (getDlmmPool caches DLMM.create).
+  // getActiveBin() reads activeId fresh but does NOT sync pool.lbPair.activeId
+  // / bitmap / clock. The chunked deposit endpoint derives delta-ids, the ix
+  // activeId arg, and bin-array coverage from pool.lbPair — if stale, the
+  // RebalanceLiquidity ix references a bin array that disagrees with chain
+  // state → 6027 InvalidBinArray. Refresh before any bin math.
+  await pool.refetchStates();
 
   const { activeBin, userPositions } = await pool.getPositionsByUserAndLbPair(
     wallet.publicKey,
@@ -265,7 +275,7 @@ async function executeBalancedRebalance(
   }
 
   const strategy = mapStrategyType(decision.strategyType);
-  const sim = await pool.simulateRebalancePositionWithBalancedStrategy(
+  const sim0 = await pool.simulateRebalancePositionWithBalancedStrategy(
     position.publicKey,
     positionData,
     strategy,
@@ -274,12 +284,12 @@ async function executeBalancedRebalance(
     ZERO_BN,
     ZERO_BN,
   );
-  const binArrayRentLamports = sim.binArrayCost + sim.bitmapExtensionCost;
+  const binArrayRentLamports = sim0.binArrayCost + sim0.bitmapExtensionCost;
 
-  const { initBinArrayInstructions, rebalancePositionInstruction } =
+  const { initBinArrayInstructions, rebalancePositionInstruction: firstRebalanceIxs } =
     await pool.rebalancePosition(
-      sim,
-      new BN(MAX_ACTIVE_BIN_SLIPPAGE),
+      sim0,
+      new BN(cfg.MAX_BIN_SLIPPAGE),
       wallet.publicKey,
       cfg.REBALANCE_SLIPPAGE_PCT,
     );
@@ -295,14 +305,65 @@ async function executeBalancedRebalance(
       ),
     );
   }
-  signatures.push(
-    await sendIxBundle(
-      "rebalance",
-      rebalancePositionInstruction,
-      wallet,
-      connection,
-    ),
-  );
+
+  // Retry-on-6004 (ExceededBinSlippageTolerance): the on-chain ix compares the
+  // active bin captured at sim time vs the live one; drift > slippage → reject.
+  // Each retry: short backoff so flash drift can settle, fetch fresh active bin,
+  // re-simulate, rebuild the ix with widened slippage (×2, ×3, capped at 50).
+  let rebalanceIxs = firstRebalanceIxs;
+  let activeBinAtBuild = activeBinId;
+  const baseSlippage = cfg.MAX_BIN_SLIPPAGE;
+  const maxAttempts = cfg.REBALANCE_MAX_RETRIES + 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      signatures.push(
+        await sendIxBundle("rebalance", rebalanceIxs, wallet, connection),
+      );
+      break;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isBinSlippage =
+        msg.includes("ExceededBinSlippageTolerance") ||
+        msg.includes("0x1774");
+      if (!isBinSlippage || attempt === maxAttempts) {
+        throw err;
+      }
+      await new Promise((r) => setTimeout(r, 750));
+      const freshActiveBin = (await pool.getActiveBin()).binId;
+      const observedDrift = Math.abs(freshActiveBin - activeBinAtBuild);
+      const previousSlippage = Math.min(50, baseSlippage * attempt);
+      const nextSlippage = Math.min(50, baseSlippage * (attempt + 1));
+      logger.warn(
+        {
+          attempt,
+          maxAttempts,
+          activeBinAtBuild,
+          freshActiveBin,
+          observedDrift,
+          previousSlippage,
+          nextSlippage,
+        },
+        "balanced rebalance: bin slippage exceeded — re-simulating with widened tolerance",
+      );
+      const simRetry = await pool.simulateRebalancePositionWithBalancedStrategy(
+        position.publicKey,
+        positionData,
+        strategy,
+        ZERO_BN,
+        ZERO_BN,
+        ZERO_BN,
+        ZERO_BN,
+      );
+      const next = await pool.rebalancePosition(
+        simRetry,
+        new BN(nextSlippage),
+        wallet.publicKey,
+        cfg.REBALANCE_SLIPPAGE_PCT,
+      );
+      rebalanceIxs = next.rebalancePositionInstruction;
+      activeBinAtBuild = freshActiveBin;
+    }
+  }
 
   return {
     path: "balanced",
@@ -325,7 +386,7 @@ async function executeBalancedRebalance(
 async function executeCloseAndReopen(
   decision: Decision,
   position: LbPosition,
-  activeBinId: number,
+  _activeBinId: number,
   _initialWindow: PriceBoundsWindow,
 ): Promise<RebalanceExecution> {
   const cfg = loadConfig();
@@ -506,16 +567,20 @@ async function executeCloseAndReopen(
   //
   //   71 ≤ width ≤ MAX_RANGE_WIDTH: SDK's single-shot init ix overruns
   //   Solana's inner-realloc cap, so we split into:
-  //     (a) initializePosition2 + N×increasePositionLength2 to grow the
-  //         position to the requested width in one tx,
+  //     (a) initializePosition (v1) at width = DEFAULT_BIN_PER_POSITION
+  //         (chunk-1 width). Do NOT pre-extend via initializePosition2 +
+  //         increasePositionLength2 — that triggers 6027 InvalidBinArray
+  //         on the first chunk's rebalanceLiquidity.
   //     (b) cap native deposit amounts to live post-rent balance,
-  //     (c) addLiquidityByStrategyChunkable txs (one per 70-bin chunk).
-  //         Each chunk tx internally wraps that chunk's native share into
-  //         WSOL ATA, runs rebalanceLiquidity, then closes the ATA. Do NOT
-  //         pre-wrap — would drain native and starve the per-chunk wrap ixs.
+  //     (c) chunkDepositWithRebalanceEndpoint(..., isParallel=false) txs
+  //         (one per 70-bin chunk). Each chunk tx internally wraps that
+  //         chunk's native share into WSOL ATA, runs rebalanceLiquidity,
+  //         then closes the ATA. Do NOT pre-wrap — would drain native and
+  //         starve the per-chunk wrap ixs. Each rebalanceLiquidity ix
+  //         auto-extends the position via inner-realloc as it deposits
+  //         into bins beyond the position's current range.
   const newPositionKp = Keypair.generate();
   const defaultBinsPerPosition = DEFAULT_BIN_PER_POSITION.toNumber();
-  const maxResizeLength = MAX_RESIZE_LENGTH.toNumber();
   const useChunkedReopen = window.width > defaultBinsPerPosition;
 
   if (!useChunkedReopen) {
@@ -540,76 +605,46 @@ async function executeCloseAndReopen(
       ),
     );
   } else {
-    // 6a. init + extend.
-    const initialWidth = Math.min(window.width, defaultBinsPerPosition);
-    type AnchorMethod = (...args: unknown[]) => {
-      accountsPartial: (a: Record<string, PublicKey>) => {
-        instruction: () => Promise<TransactionInstruction>;
-      };
-    };
-    const program = pool.program as unknown as {
-      methods: {
-        initializePosition2: AnchorMethod;
-        increasePositionLength2: AnchorMethod;
-      };
-    };
-    const initIx = await program.methods
-      .initializePosition2(window.minBinId, initialWidth)
-      .accountsPartial({
-        payer: wallet.publicKey,
-        position: newPositionKp.publicKey,
-        lbPair: pool.pubkey,
-        owner: wallet.publicKey,
-      })
-      .instruction();
-
-    const extendIxs: TransactionInstruction[] = [];
-    let currentEndBin = window.minBinId + initialWidth - 1;
-    while (currentEndBin < window.maxBinId) {
-      currentEndBin = Math.min(currentEndBin + maxResizeLength, window.maxBinId);
-      const extIx = await program.methods
-        .increasePositionLength2(currentEndBin)
-        .accountsPartial({
-          funder: wallet.publicKey,
-          lbPair: pool.pubkey,
-          position: newPositionKp.publicKey,
-          owner: wallet.publicKey,
-        })
-        .instruction();
-      extendIxs.push(extIx);
-    }
+    // 6a. Create the new position at FULL width up front via the SDK's
+    //     purpose-built createExtendedEmptyPosition (one tx). It returns an
+    //     EMPTY position (zero liquidity), so the on-chain ShrinkBoth walk has
+    //     no occupied bins outside a chunk to trip on — sidestepping the 6027
+    //     InvalidBinArray that the old initializePosition2 + increasePositionLength2
+    //     pre-extend hit (that path pre-extended a position that then deposited
+    //     and forced ShrinkBoth over bin arrays not in remainingAccounts).
+    //     Chunked add-liquidity (6c) then fills the bins. Matches the proven
+    //     dlmm-position-manager flow.
+    const initTx = await pool.createExtendedEmptyPosition(
+      window.minBinId,
+      window.maxBinId,
+      newPositionKp.publicKey,
+      wallet.publicKey,
+    );
 
     logger.info(
       {
         position: newPositionKp.publicKey.toBase58(),
         minBinId: window.minBinId,
         maxBinId: window.maxBinId,
-        width: window.width,
-        initialWidth,
-        extendCount: extendIxs.length,
+        requestedWidth: window.width,
       },
-      "close-reopen: init+extend position",
+      "close-reopen: create extended empty position (full width)",
     );
 
     signatures.push(
-      await sendIxBundleWithExtraSigners(
-        "create-and-extend-position",
-        [initIx, ...extendIxs],
-        wallet,
-        [newPositionKp],
+      await sendBuiltTx(
+        "create-position",
+        initTx,
+        [wallet, newPositionKp],
         connection,
       ),
     );
 
-    // 6b. Cap native deposit amounts to live post-create-and-extend balance.
-    //     The init+extend tx pays rent for the new position account + extend
-    //     reallocs (~28M lamports on a 94-bin position) out of the same
-    //     wallet that funds our deposit. If we pass the pre-tx
-    //     totalXAmount/totalYAmount unchanged, the SDK's per-chunk
-    //     wrapSOLInstruction attempts to transfer more native than is left
-    //     and fails with `Transfer: insufficient lamports`.
-    //     readDepositableBalance subtracts SOL_RESERVE_LAMPORTS so fees +
-    //     rent for chunk txs themselves stay funded.
+    // 6b. Cap native deposit amounts to live post-init balance. Rent for the
+    //     freshly-created 70-bin position (~5M lamports) plus per-chunk
+    //     wrap-SOL transfers come out of the same SOL balance.
+    //     readDepositableBalance subtracts SOL_RESERVE_LAMPORTS so fees stay
+    //     funded across all chunks.
     if (xMint.equals(NATIVE_MINT) && !totalXAmount.isZero()) {
       const liveX = await readDepositableBalance(xMint, wallet.publicKey, connection);
       if (liveX.lt(totalXAmount)) {
@@ -639,19 +674,62 @@ async function executeCloseAndReopen(
       }
     }
 
-    // 6c. Chunked add-liquidity. SDK wraps+closes WSOL per chunk internally.
-    const liquidityTxs = await pool.addLiquidityByStrategyChunkable({
-      positionPubKey: newPositionKp.publicKey,
+    // 6c. Chunked add-liquidity into the (already full-width, empty) position
+    //     created in 6a. Call the SDK helper directly in SEQUENTIAL mode
+    //     (isParallel=false → shrinkMode=ShrinkBoth); this is the same flow a
+    //     known-working on-chain position used. SDK wraps+closes WSOL and
+    //     inserts setComputeUnitLimit per chunk.
+    //
+    //     The delta-ids, the ix activeId arg, and bin-array coverage are all
+    //     derived from pool.lbPair.activeId + bitmap below. createExtendedEmptyPosition
+    //     and the Jupiter swap took time, so re-sync pool state to the live
+    //     active bin first — a stale activeId here is what produced the
+    //     RebalanceLiquidity 6027 InvalidBinArray (delta-ids/bin-arrays
+    //     disagreeing with the position's fresh range and chain state).
+    await pool.refetchStates();
+    const strategyType = mapStrategyType(decision.strategyType);
+    const maxActiveBinSlippage = getAndCapMaxActiveBinSlippage(
+      cfg.REBALANCE_SLIPPAGE_PCT,
+      pool.lbPair.binStep,
+      cfg.MAX_BIN_SLIPPAGE,
+    );
+    const liquidityStrategyParameters = buildLiquidityStrategyParameters(
       totalXAmount,
       totalYAmount,
-      strategy: {
+      new BN(window.minBinId - pool.lbPair.activeId),
+      new BN(window.maxBinId - pool.lbPair.activeId),
+      new BN(pool.lbPair.binStep),
+      false,
+      new BN(pool.lbPair.activeId),
+      getLiquidityStrategyParameterBuilder(strategyType),
+    );
+    const chunkIxLists = await chunkDepositWithRebalanceEndpoint(
+      pool,
+      {
         minBinId: window.minBinId,
         maxBinId: window.maxBinId,
-        strategyType: mapStrategyType(decision.strategyType),
+        strategyType,
+        singleSidedX: false,
       },
-      user: wallet.publicKey,
-      slippage: cfg.REBALANCE_SLIPPAGE_PCT,
-    });
+      cfg.REBALANCE_SLIPPAGE_PCT,
+      maxActiveBinSlippage,
+      newPositionKp.publicKey,
+      window.minBinId,
+      window.maxBinId,
+      liquidityStrategyParameters,
+      wallet.publicKey,
+      wallet.publicKey,
+      false,
+    );
+    const { blockhash, lastValidBlockHeight } =
+      await connection.getLatestBlockhash();
+    const liquidityTxs = chunkIxLists.map((ixs) =>
+      new Transaction({
+        blockhash,
+        lastValidBlockHeight,
+        feePayer: wallet.publicKey,
+      }).add(...ixs),
+    );
     for (let i = 0; i < liquidityTxs.length; i++) {
       signatures.push(
         await sendBuiltTx(
