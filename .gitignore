@@ -13,8 +13,8 @@ web/dist/
 .env.*
 !.env.example
 
-# runtime data
-data/
+# runtime data (root only — must not match src/data/)
+/data/
 
 # logs
 *.log
