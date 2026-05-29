@@ -6,18 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Meteora DLMM LP manager for a single configured pool. A Node.js process polls OHLCV data + on-chain position state, asks an LLM (Gemini 2.5 Flash by default) for a decision, then notifies via Telegram with a countdown before executing on-chain. Full design rationale and phased build plan are in `PLAN.md`.
 
-**Current build phase: 8** — read-only web dashboard live at `http://127.0.0.1:3001` (default). Fastify server embedded in bot process. Vite+React frontend with IBM Plex typography, custom CSS design system, light/dark mode. All prior phases complete.
+Backend-only bot: Telegram control plane + CLI tools. No web dashboard.
 
 ## Commands
 
 ```bash
-npm run dev          # start bot with live-reload (tsx watch); dashboard at :3001
-npm run build        # compile TypeScript + build Vite frontend → dist/
-npm run build:web    # build frontend only (web/ → dist/web/)
-npm run typecheck    # type-check bot TypeScript
-npm run typecheck:web # type-check web frontend
+npm run dev          # start bot with live-reload (tsx watch)
+npm run build        # compile TypeScript → dist/
+npm run typecheck    # type-check TypeScript
 npm run start        # run compiled dist/index.js
-npm run dev:web      # Vite dev server at :5174 (proxies /api → :3001)
 
 # One-shot CLI tools (no bot required)
 npm run status       # dump current pool + position state
@@ -93,45 +90,8 @@ src/
     commands.ts      — /status /pnl /analyze /decide /cancel /pause /resume /sched /help
     countdown.ts     — queueRebalance(), cancelPending(), fire() with countdown timer
 
-  web/
-    server.ts        — Fastify init; registers routes; serves dist/web/ as SPA
-    routes/
-      status.ts      — GET /api/status → PortfolioSnapshot + mode + wallet
-      health.ts      — GET /api/health → uptime, db size, mode, paused flag
-      decisions.ts   — GET /api/decisions?limit&before, GET /api/decisions/:id
-      indicators.ts  — GET /api/indicators → last IndicatorPack per timeframe
-      ohlcv.ts       — GET /api/ohlcv?interval=1H|4H|1D → cached OhlcvSnapshot
-      pool.ts        — GET /api/pool → Meteora API pool metadata
-      scheduler.ts   — GET /api/scheduler → job list + enabled/paused state
-      pnl.ts         — GET /api/pnl, GET /api/pnl/history?positionAddress=…
-
   cli/
     status.ts / analyze.ts / decide.ts / pnl.ts
-
-web/                 — Vite+React frontend (separate package)
-  src/
-    App.tsx          — grid layout: Sidebar + Topbar + routed page
-    styles.css       — design tokens (dark default + body.light override), layout primitives
-    components/
-      Sidebar.tsx    — nav + brand mark + wallet foot
-      Topbar.tsx     — pair chip, mode badge, theme toggle, live/paused status
-      atoms.tsx      — ActionPill, ConfBar, AddressChip, KpiTile
-      BinRangeViz.tsx — per-bin liquidity chart (curve/spot/bid-ask; in/out-of-range)
-      Charts.tsx     — CandleChart, RsiChart, MacdChart (inline SVG)
-      icons.tsx      — small SVG icon set
-    pages/
-      Overview.tsx   — KPI tiles, position range, last decision, pool vitals, 4H candles
-      Decisions.tsx  — filterable table + detail drawer with raw LLM input
-      Indicators.tsx — 1H/4H/1D panels: candles + EMA/BB + RSI + MACD
-      Schedule.tsx   — cron job table, paused banner, Telegram command reference
-      Pnl.tsx        — fees + USD PnL view, sourced from Meteora indexer
-    lib/
-      api.ts         — fetch wrappers for all /api/* routes
-      queries.ts     — @tanstack/react-query hooks (useStatus, useDecisions, useOhlcv, …)
-      schemas.ts     — frontend mirrors of backend response shapes
-      types.ts       — shared types (Candle, IndicatorBundle, Action, CycleType, …)
-      format.ts      — fmt helpers (usd, num, pct, addr)
-      mocks.ts       — static mock data + indicator compute functions (fallback when API offline)
 ```
 
 ## Pool configuration
@@ -221,7 +181,7 @@ Orchestrator `swapTokensToTargetRatio` runs inside the close+reopen path between
 
 Meteora's `pnlUsd` = (allTimeWithdrawals + currentValue + unclaimedFees) − allTimeDeposits, priced with historical per-event USD oracles. This is exactly the "vs cost-basis" frame — IL, fees, and Jupiter swap slippage are all rolled in (swaps appear as the USD gap between consecutive close-withdrawal and reopen-deposit events). No on-chain ledger needed.
 
-`buildPnlReport({force?})` caches results 60s per (wallet,pool) key. Renderers: `formatPnlText` (CLI + Telegram), `formatPnlHtml` (Telegram wrapper). The dashboard hits `/api/pnl` (60s `staleTime`) and `/api/pnl/history?positionAddress=…` (lazy, on drawer open). Telegram exposes `/pnl`; CLI exposes `npm run pnl`.
+`buildPnlReport({force?})` caches results 60s per (wallet,pool) key. Renderers: `formatPnlText` (CLI + Telegram), `formatPnlHtml` (Telegram wrapper). Telegram exposes `/pnl`; CLI exposes `npm run pnl`.
 
 `MODE=dryrun` doesn't affect PnL — Meteora reflects on-chain reality regardless of bot mode.
 
@@ -256,24 +216,12 @@ Pause/resume via `/pause` and `/resume` Telegram commands, or `setPaused()` from
 - `WIDTH_CHANGE_TOLERANCE_BINS` — controls balanced vs close+reopen dispatch (default 5)
 - `SOL_RESERVE_LAMPORTS` (50_000_000 = 0.05 SOL) — always held back from SOL balance before redeposit
 
-## Web dashboard
-
-Dashboard starts automatically with `npm run dev` / `npm run start`. Bound to `127.0.0.1` — not reachable remotely without a tunnel.
-
-- API endpoints: all `GET /api/*`, read-only, no auth.
-- Frontend build output: `dist/web/` (SPA, served by Fastify's static plugin).
-- Dev mode: `npm run dev:web` starts Vite at `:5174`; it proxies `/api` to `:3001`.
-- Light/dark: `ThemeToggle` in topbar flips `body.light`; persisted in `localStorage` as `waza.theme`.
-- Indicators page computes EMA/RSI/BB/MACD client-side from OHLCV candles; falls back to mock data if API returns 404.
-
 ## Key env vars
 
 See `.env.example` for full list. Minimum to start the bot:
 ```
 RPC_URL, WALLET_PRIVATE_KEY, POOL_ADDRESS, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 ```
-Optional dashboard config: `DASHBOARD_ENABLED` (default true), `DASHBOARD_PORT` (default 3001). Host is hardcoded to `127.0.0.1`.
-
 Swap layer: `SWAP_ENABLED` (default true), `JUPITER_API_KEY` (optional — free tier works without), `SWAP_SLIPPAGE_BPS` (default 100), `SWAP_MIN_USD` (default 1), `COMPOSITION_SHIFT_THRESHOLD_PCT` (default 10).
 
 Rebalance resilience: `MAX_BIN_SLIPPAGE` (default 15) is the base active-bin drift tolerance; retries escalate it ×2 / ×3 (cap 50). `REBALANCE_MAX_RETRIES` (default 2) sleeps 750ms between attempts, re-simulates, and rebuilds the ix with the widened slippage on error 6004.

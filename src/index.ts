@@ -5,7 +5,6 @@ import { getBot, notify } from "./telegram/bot";
 import { resolveActivePool } from "./poolMode";
 import { getDb } from "./state/db";
 import { startScheduler, stopScheduler } from "./scheduler";
-import { startWebServer, stopWebServer } from "./web/server";
 import { logger } from "./logger";
 
 async function main() {
@@ -14,18 +13,6 @@ async function main() {
 
   // Initialize SQLite (runs migrations on first boot).
   getDb();
-
-  // Start the dashboard early — it has zero Telegram dependency, so a bad bot
-  // token or Telegram outage must not take it down with them.
-  if (cfg.DASHBOARD_ENABLED) {
-    await startWebServer({ host: "127.0.0.1", port: cfg.DASHBOARD_PORT }).catch(
-      (err) =>
-        logger.warn(
-          { err: err instanceof Error ? err.message : err },
-          "dashboard server failed to start",
-        ),
-    );
-  }
 
   const activePool = resolveActivePool();
 
@@ -63,7 +50,6 @@ async function main() {
   // Graceful shutdown so Telegram drops the long-poll cleanly when we Ctrl+C.
   const shutdown = async (sig: NodeJS.Signals) => {
     logger.info({ sig }, "shutting down");
-    await stopWebServer().catch(() => {});
     await stopScheduler().catch(() => {});
     bot.stop(sig);
   };

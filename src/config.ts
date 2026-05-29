@@ -90,13 +90,6 @@ const Schema = z.object({
   // dispatcher forces close+reopen even when width is within tolerance.
   COMPOSITION_SHIFT_THRESHOLD_PCT: z.coerce.number().positive().max(100).default(10),
 
-  // Read-only web dashboard (Phase 8). Bound to 127.0.0.1.
-  DASHBOARD_ENABLED: z
-    .union([z.boolean(), z.string()])
-    .default(true)
-    .transform((v) => (typeof v === "string" ? v.toLowerCase() !== "false" : v)),
-  DASHBOARD_PORT: z.coerce.number().int().positive().default(3001),
-
 });
 
 export type Config = z.infer<typeof Schema>;
