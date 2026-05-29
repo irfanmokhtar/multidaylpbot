@@ -25,6 +25,12 @@ import {
   type PositionPnLData,
   type PoolPortfolioItem,
 } from "./data/meteora_pnl";
+import {
+  computeTruePnl,
+  getCostBasisBaseline,
+  formatTruePnlLines,
+  type TruePnlResult,
+} from "./truePnl";
 
 export interface PnlReportTotal {
   pnlUsd: number;
@@ -80,6 +86,8 @@ export interface PnlReport {
   notIndexed: boolean;
   total: PnlReportTotal;
   positions: PnlReportPosition[];
+  /** Cost-basis-anchored True P&L. Null when baseline unavailable. */
+  truePnl: TruePnlResult | null;
 }
 
 const CACHE_TTL_MS = 60_000;
@@ -152,6 +160,7 @@ export async function buildPnlReport(options: { force?: boolean } = {}): Promise
       notIndexed: true,
       total: zeroTotal(),
       positions: [],
+      truePnl: null,
     };
     cache.set(key, { at: Date.now(), report: empty });
     return empty;
@@ -235,7 +244,32 @@ export async function buildPnlReport(options: { force?: boolean } = {}): Promise
       lastFeeClaimAt: claims ? isoToMs(claims.last_fee_claim_time ?? null) : null,
     },
     positions,
+    truePnl: null,
   };
+
+  // True P&L — Meteora's current figures (principal / unclaimed / withdrawn)
+  // anchored to the DB-pinned first-deposit baseline. SOL price = tokenXPrice
+  // (X is SOL). Best-effort; leaves truePnl null on any failure.
+  try {
+    const solPrice = report.pool?.tokenXPrice ?? 0;
+    if (report.pool && solPrice > 0 && !report.notIndexed) {
+      const baseline = await getCostBasisBaseline(report.pool.address);
+      if (baseline) {
+        report.truePnl = computeTruePnl({
+          baseline,
+          currentPrincipalUsd: report.total.currentBalancesUsd,
+          currentUnclaimedFeesUsd: report.total.unclaimedFeesUsd,
+          totalFeesWithdrawnUsd: report.total.feesUsd,
+          currentSolPrice: solPrice,
+        });
+      }
+    }
+  } catch (err) {
+    logger.debug(
+      { err: err instanceof Error ? err.message : err },
+      "true-pnl: pnl computation failed",
+    );
+  }
 
   cache.set(key, { at: Date.now(), report });
   return report;
@@ -353,6 +387,11 @@ export function formatPnlText(r: PnlReport): string {
           (p.closedAt != null ? `  closed ${fmtDateAge(p.closedAt)}` : ""),
       );
     }
+  }
+
+  if (r.truePnl) {
+    lines.push("");
+    lines.push(...formatTruePnlLines(r.truePnl));
   }
 
   return lines.join("\n");

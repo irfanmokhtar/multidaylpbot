@@ -2,6 +2,11 @@ import type { Telegraf } from "telegraf";
 import { logger } from "../logger";
 import { buildStatusReport, renderStatusHtml } from "../report";
 import { buildPnlReport, formatPnlHtml } from "../pnlReport";
+import {
+  previewReset,
+  resetBaselineToCurrent,
+  formatResetSummary,
+} from "../truePnl";
 import { runAnalysis, formatDecisionHtml } from "../ai/analyzer";
 import {
   runIndicatorsPass,
@@ -27,6 +32,7 @@ const HELP_TEXT = `<b>multidaylpbot</b> — Meteora DLMM SOL/USDC manager
 <b>Available commands</b>
 /status   — current pool, active bin, and your position(s)
 /pnl      — fees collected + total USD PnL vs cost basis (via Meteora indexer)
+/resetbaseline — re-anchor the True P&L baseline to the current position
 /analyze  — raw indicator pass (OHLCV + RSI/EMA/BB/MACD/ATR; no LLM)
 /decide   — full analyzer pass + approval prompt when rebalance recommended (MODE=live)
 /cancel   — no-op (execution is immediate; kept for back-compat)
@@ -84,6 +90,37 @@ export function registerCommands(bot: Telegraf): void {
       );
       await ctx.reply(
         `⚠️ Failed to build status report: ${
+          err instanceof Error ? err.message : "unknown error"
+        }`,
+      );
+    }
+  });
+
+  // /resetbaseline — re-anchor the True-P&L baseline to the current position.
+  // Shows a preview with a confirm button; the write happens on confirm.
+  bot.command("resetbaseline", async (ctx) => {
+    await ctx.sendChatAction("typing").catch(() => {});
+    try {
+      const summary = await previewReset();
+      const body = formatResetSummary(summary, false).join("\n");
+      await ctx.replyWithHTML(`<pre>${body}</pre>`, {
+        link_preview_options: { is_disabled: true },
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "✅ Confirm reset", callback_data: "tpreset_confirm" },
+              { text: "✖️ Cancel", callback_data: "tpreset_cancel" },
+            ],
+          ],
+        },
+      });
+    } catch (err) {
+      logger.error(
+        { err: err instanceof Error ? err.message : err },
+        "/resetbaseline failed",
+      );
+      await ctx.reply(
+        `⚠️ Could not preview reset: ${
           err instanceof Error ? err.message : "unknown error"
         }`,
       );
@@ -211,6 +248,31 @@ export function registerCommands(bot: Telegraf): void {
     if (!result.ok) {
       await ctx.answerCbQuery(`Failed: ${result.reason ?? "unknown"}`, { show_alert: true });
     }
+  });
+
+  bot.action("tpreset_confirm", async (ctx) => {
+    await ctx.answerCbQuery("Resetting…");
+    try {
+      const summary = await resetBaselineToCurrent();
+      const body = formatResetSummary(summary, true).join("\n");
+      await ctx.editMessageText(`<pre>${body}</pre>`, {
+        parse_mode: "HTML",
+      }).catch(() => {});
+    } catch (err) {
+      logger.error(
+        { err: err instanceof Error ? err.message : err },
+        "tpreset_confirm failed",
+      );
+      await ctx.answerCbQuery(
+        `Failed: ${err instanceof Error ? err.message : "unknown"}`,
+        { show_alert: true },
+      );
+    }
+  });
+
+  bot.action("tpreset_cancel", async (ctx) => {
+    await ctx.answerCbQuery("Cancelled.");
+    await ctx.editMessageText("✖️ Baseline reset cancelled.").catch(() => {});
   });
 
   bot.action(/^rb_reject:(.+)$/, async (ctx) => {

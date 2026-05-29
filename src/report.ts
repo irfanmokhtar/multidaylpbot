@@ -12,6 +12,14 @@ import {
   type PositionSummary,
 } from "./dlmm/positions";
 import { renderBinChart } from "./dlmm/binChart";
+import { logger } from "./logger";
+import { buildPnlReport } from "./pnlReport";
+import {
+  computeTruePnl,
+  getCostBasisBaseline,
+  formatTruePnlLines,
+  type TruePnlResult,
+} from "./truePnl";
 
 export interface RenderOpts {
   withChart?: boolean;
@@ -22,6 +30,9 @@ export interface StatusReport {
   activeBin: { binId: number; pricePerToken: string; binStep: number };
   mode: "dryrun" | "live";
   wallet: string;
+  /** Cost-basis-anchored True P&L. Null when not computable (non-stable pair,
+   *  no positions, or Meteora baseline not yet available). */
+  truePnl: TruePnlResult | null;
 }
 
 export async function buildStatusReport(): Promise<StatusReport> {
@@ -31,6 +42,7 @@ export async function buildStatusReport(): Promise<StatusReport> {
     getActiveBinSummary(),
     getPortfolioSnapshot(),
   ]);
+  const truePnl = await buildTruePnl(snapshot, activeBin.pricePerToken);
   return {
     snapshot,
     activeBin: {
@@ -40,7 +52,59 @@ export async function buildStatusReport(): Promise<StatusReport> {
     },
     mode: cfg.MODE,
     wallet: wallet.publicKey.toBase58(),
+    truePnl,
   };
+}
+
+/**
+ * Build the True P&L from the live on-chain snapshot (principal + unclaimed
+ * fees) plus the DB-pinned baseline and Meteora's cumulative withdrawn fees.
+ * Best-effort — returns null on any failure so /status never breaks.
+ *
+ * Only the canonical SOL/USDC case is supported (tokenY stablecoin, tokenX the
+ * non-stable SOL side) — that's how this bot's baseline seed is keyed.
+ */
+async function buildTruePnl(
+  s: PortfolioSnapshot,
+  activeBinPrice: string,
+): Promise<TruePnlResult | null> {
+  try {
+    if (!s.tokenY.isStablecoin || s.tokenX.isStablecoin) return null;
+    if (s.positions.length === 0) return null;
+
+    const price = parseFloat(activeBinPrice);
+    if (!Number.isFinite(price) || price <= 0) return null;
+
+    const baseline = await getCostBasisBaseline(s.pool);
+    if (!baseline) return null;
+
+    const currentPrincipalUsd = s.positions.reduce(
+      (a, p) => a + p.totalX * price + p.totalY,
+      0,
+    );
+    const currentUnclaimedFeesUsd = s.positions.reduce(
+      (a, p) => a + p.feeX * price + p.feeY,
+      0,
+    );
+
+    // Cumulative withdrawn fees from Meteora (cached 60s, survives rebalances).
+    const pnl = await buildPnlReport();
+    const totalFeesWithdrawnUsd = pnl.total.feesUsd;
+
+    return computeTruePnl({
+      baseline,
+      currentPrincipalUsd,
+      currentUnclaimedFeesUsd,
+      totalFeesWithdrawnUsd,
+      currentSolPrice: price,
+    });
+  } catch (err) {
+    logger.debug(
+      { err: err instanceof Error ? err.message : err },
+      "true-pnl: status computation failed",
+    );
+    return null;
+  }
 }
 
 // ─── formatting helpers ───────────────────────────────────────────────────────
@@ -232,6 +296,11 @@ export function renderStatusText(r: StatusReport, opts?: RenderOpts): string {
     if (valueKnown) {
       lines.push(row("Total value", `≈ ${fmtUsd(totalValueUsd)}`, labelW));
     }
+  }
+
+  if (r.truePnl) {
+    lines.push(``);
+    lines.push(...formatTruePnlLines(r.truePnl));
   }
 
   return lines.join("\n");

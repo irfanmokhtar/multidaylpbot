@@ -49,6 +49,7 @@ import { loadWallet } from "../wallet";
 import { resolveToken } from "../tokens";
 import { swapTokensToTargetRatio, type SwapResult } from "../swap/jupiter";
 import { getDlmmPool } from "./client";
+import { costBasisRepo } from "../state/repos";
 import { deriveTargetXWeight, currentXWeight } from "./composition";
 import { mapStrategyType, priceBoundsToWindow, type PriceBoundsWindow } from "./strategy";
 import type { Decision } from "../ai/types";
@@ -223,12 +224,26 @@ export async function executeRebalance(decision: Decision): Promise<RebalanceExe
     const r = await executeBalancedRebalance(decision, position, activeBin.binId, window);
     r.targetXWeight = target.xWeight;
     r.currentXWeight = current.xWeight;
+    bumpRebalanceCount(pool.pubkey.toBase58());
     return r;
   }
   const r = await executeCloseAndReopen(decision, position, activeBin.binId, window);
   r.targetXWeight = target.xWeight;
   r.currentXWeight = current.xWeight;
+  bumpRebalanceCount(pool.pubkey.toBase58());
   return r;
+}
+
+/** Bump the local True-P&L rebalance counter; never block a rebalance on DB error. */
+function bumpRebalanceCount(pool: string): void {
+  try {
+    costBasisRepo.incrementRebalance(pool);
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : err },
+      "rebalance: failed to increment cost_basis counter",
+    );
+  }
 }
 
 function round3(n: number): number {

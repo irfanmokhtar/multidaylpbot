@@ -12,6 +12,7 @@
     "analyze": "tsx src/cli/analyze.ts",
     "decide": "tsx src/cli/decide.ts",
     "pnl": "tsx src/cli/pnl.ts",
+    "reset-baseline": "tsx src/cli/resetBaseline.ts",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js"
   },

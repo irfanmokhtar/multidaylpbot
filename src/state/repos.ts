@@ -280,3 +280,132 @@ export const indicatorReadingRepo = {
       .run(keepPerInterval);
   },
 };
+
+// ─── cost_basis ──────────────────────────────────────────────────────────────
+
+export interface CostBasisRow {
+  pool: string;
+  initialCapitalUsd: number | null;
+  initialXAmount: number | null;
+  initialYAmount: number | null;
+  solPriceAtEntry: number | null;
+  openedAt: number | null;
+  rebalanceCount: number;
+  baselinePinnedAt: number | null;
+  /** Meteora cumulative totalFee at last reset; subtracted from withdrawn fees. */
+  feesWithdrawnOffset: number;
+}
+
+export const costBasisRepo = {
+  get(pool: string): CostBasisRow | null {
+    const row = getDb()
+      .prepare(
+        `SELECT pool,
+                initial_capital_usd AS initialCapitalUsd,
+                initial_x_amount    AS initialXAmount,
+                initial_y_amount    AS initialYAmount,
+                sol_price_at_entry  AS solPriceAtEntry,
+                opened_at           AS openedAt,
+                rebalance_count     AS rebalanceCount,
+                baseline_pinned_at  AS baselinePinnedAt,
+                fees_withdrawn_offset AS feesWithdrawnOffset
+         FROM cost_basis WHERE pool = ?`,
+      )
+      .get(pool) as CostBasisRow | undefined;
+    return row ?? null;
+  },
+
+  /**
+   * Pin the baseline (first-deposit cost basis). Idempotent on the baseline
+   * columns. `seedRebalanceCount` only applies when the row is new — we never
+   * clobber a counter that has already advanced via incrementRebalance().
+   */
+  pinBaseline(args: {
+    pool: string;
+    initialCapitalUsd: number;
+    initialXAmount: number;
+    initialYAmount: number;
+    solPriceAtEntry: number;
+    openedAt: number | null;
+    seedRebalanceCount: number;
+  }): void {
+    getDb()
+      .prepare(
+        `INSERT INTO cost_basis
+           (pool, initial_capital_usd, initial_x_amount, initial_y_amount,
+            sol_price_at_entry, opened_at, rebalance_count, baseline_pinned_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(pool) DO UPDATE SET
+           initial_capital_usd = excluded.initial_capital_usd,
+           initial_x_amount    = excluded.initial_x_amount,
+           initial_y_amount    = excluded.initial_y_amount,
+           sol_price_at_entry  = excluded.sol_price_at_entry,
+           opened_at           = excluded.opened_at,
+           baseline_pinned_at  = excluded.baseline_pinned_at`,
+      )
+      .run(
+        args.pool,
+        args.initialCapitalUsd,
+        args.initialXAmount,
+        args.initialYAmount,
+        args.solPriceAtEntry,
+        args.openedAt,
+        args.seedRebalanceCount,
+        Date.now(),
+      );
+  },
+
+  /**
+   * Re-anchor the baseline to the current position. Resets opened_at to now,
+   * zeroes the rebalance counter, and records `feesWithdrawnOffset` (Meteora
+   * cumulative totalFee at this instant) so post-reset fees start from zero.
+   */
+  resetBaseline(args: {
+    pool: string;
+    initialCapitalUsd: number;
+    initialXAmount: number;
+    initialYAmount: number;
+    solPriceAtEntry: number;
+    feesWithdrawnOffset: number;
+  }): void {
+    getDb()
+      .prepare(
+        `INSERT INTO cost_basis
+           (pool, initial_capital_usd, initial_x_amount, initial_y_amount,
+            sol_price_at_entry, opened_at, rebalance_count, baseline_pinned_at,
+            fees_withdrawn_offset)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+         ON CONFLICT(pool) DO UPDATE SET
+           initial_capital_usd   = excluded.initial_capital_usd,
+           initial_x_amount      = excluded.initial_x_amount,
+           initial_y_amount      = excluded.initial_y_amount,
+           sol_price_at_entry    = excluded.sol_price_at_entry,
+           opened_at             = excluded.opened_at,
+           rebalance_count       = 0,
+           baseline_pinned_at    = excluded.baseline_pinned_at,
+           fees_withdrawn_offset = excluded.fees_withdrawn_offset`,
+      )
+      .run(
+        args.pool,
+        args.initialCapitalUsd,
+        args.initialXAmount,
+        args.initialYAmount,
+        args.solPriceAtEntry,
+        Date.now(),
+        Date.now(),
+        args.feesWithdrawnOffset,
+      );
+  },
+
+  /** Bump the local rebalance counter; creates a counter-only row if absent. */
+  incrementRebalance(pool: string): void {
+    getDb()
+      .prepare(
+        `INSERT INTO cost_basis (pool, rebalance_count)
+         VALUES (?, 1)
+         ON CONFLICT(pool) DO UPDATE SET
+           rebalance_count = rebalance_count + 1`,
+      )
+      .run(pool);
+  },
+};

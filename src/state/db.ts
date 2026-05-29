@@ -64,6 +64,23 @@ const MIGRATIONS: string[] = [
    );
    CREATE INDEX IF NOT EXISTS idx_indreading_symbol_interval_time
      ON indicator_reading(symbol, interval, taken_at DESC);`,
+  // 5: per-pool cost-basis baseline for the True P&L view. One row per pool.
+  //    The baseline (initial deposit) is pinned ONCE — never reset on rebalance.
+  //    rebalance_count is a local counter bumped on every executeRebalance.
+  `CREATE TABLE IF NOT EXISTS cost_basis (
+     pool                TEXT PRIMARY KEY,
+     initial_capital_usd REAL,              -- USD value of first deposit
+     initial_x_amount    REAL,              -- non-stable (SOL) side at first deposit
+     initial_y_amount    REAL,              -- stable (USDC) side at first deposit
+     sol_price_at_entry  REAL,
+     opened_at           INTEGER,           -- unix ms (first deposit blockTime)
+     rebalance_count     INTEGER NOT NULL DEFAULT 0,
+     baseline_pinned_at  INTEGER            -- unix ms; null until seeded
+   );`,
+  // 6: fee offset for baseline resets. On reset we re-anchor to the current
+  //    position and snapshot Meteora's cumulative totalFee here, so post-reset
+  //    "fees withdrawn" counts only fees claimed AFTER the reset point.
+  `ALTER TABLE cost_basis ADD COLUMN fees_withdrawn_offset REAL NOT NULL DEFAULT 0;`,
 ];
 
 export function getDb(): Database.Database {
