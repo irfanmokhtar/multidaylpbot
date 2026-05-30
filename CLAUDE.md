@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-A Meteora DLMM LP manager for a single configured pool. A Node.js process polls OHLCV data + on-chain position state, asks an LLM (Gemini 2.5 Flash by default) for a decision, then notifies via Telegram with a countdown before executing on-chain. Full design rationale and phased build plan are in `PLAN.md`.
+A Meteora DLMM LP manager for a single configured pool. A Node.js process polls OHLCV data + on-chain position state, asks an LLM (Gemini 2.5 Flash by default) for a decision, then (in MODE=live) sends the rebalance proposal to Telegram for explicit approval before executing on-chain. Full design rationale and phased build plan are in `PLAN.md`.
 
 Backend-only bot: Telegram control plane + CLI tools. No web dashboard.
 
@@ -17,10 +17,12 @@ npm run typecheck    # type-check TypeScript
 npm run start        # run compiled dist/index.js
 
 # One-shot CLI tools (no bot required)
-npm run status       # dump current pool + position state
-npm run analyze      # raw indicator pass (OHLCV + RSI/EMA/BB/MACD/ATR; no LLM)
-npm run decide       # full analyzer pass including LLM decision
-npm run pnl          # fees collected + USD PnL via Meteora indexer
+npm run status         # dump current pool + position state
+npm run analyze        # raw indicator pass (OHLCV + RSI/EMA/BB/MACD/ATR + volume; no LLM)
+npm run decide         # full analyzer pass including LLM decision
+npm run pnl            # fees + Meteora-indexed USD PnL + True P&L (cost-basis) view
+npm run fees           # recent on-chain action costs (tx fees + swap slippage) from action_log
+npm run reset-baseline # re-anchor the True-PnL cost-basis baseline to the current position
 ```
 
 SQLite inspection:
@@ -44,8 +46,12 @@ src/
   report.ts          — buildStatusReport() + text/HTML renderers (shared by CLI + Telegram);
                        text renderer optionally embeds renderBinChart() per position
   indicatorsReport.ts — runIndicatorsPass() + formatIndicatorsText/Html() (shared by CLI + /analyze)
-  scheduler.ts       — three node-cron jobs: daily-ta, intraday-ta, position-health
-  pnlReport.ts       — buildPnlReport() + formatPnlText/Html() (Meteora-indexed PnL view)
+  scheduler.ts       — three node-cron jobs: daily-ta, intraday-ta, hourly-check
+  pnlReport.ts       — buildPnlReport() + formatPnlText/Html(); merges Meteora-indexed PnL
+                       with the True-PnL (cost-basis) view from truePnl.ts
+  truePnl.ts         — cost-basis baseline: buildTruePnlReport()/formatTruePnlText(),
+                       seedBaselineIfMissing(), previewReset()/resetBaselineToCurrent()/
+                       formatResetSummary()
   index.ts           — boot: config → wallet → DLMM → bot → scheduler
 
   dlmm/
@@ -65,7 +71,9 @@ src/
   data/
     birdeye.ts       — fetchOhlcv({ interval, candles }); 1.1s throttle, 429 retry,
                        multi-key rotation on CU/quota exhaustion (BIRDEYE_API_KEYS)
-    indicators.ts    — computeIndicators(candles) → RSI, EMA, BB, MACD, ATR
+    indicators.ts    — computeIndicators(candles) → IndicatorPack: close, RSI14,
+                       EMA20/50/200, BB (+%b), MACD, ATR14 (+atrPct), volume + volumeSma20,
+                       and a derived trend stack (vsEma20/50/200, bullish/bearishStacked)
     meteora_api.ts   — getPool(address); base URL https://dlmm.datapi.meteora.ag
     meteora_pnl.ts   — portfolio/PnL/total_claims/historical fetchers (same host)
 
@@ -83,15 +91,20 @@ src/
 
   state/
     db.ts            — better-sqlite3 init + sequential migrations via user_version pragma
-    repos.ts         — decisionRepo, ohlcvRepo, indicatorReadingRepo
+    repos.ts         — decisionRepo, ohlcvRepo, indicatorReadingRepo, actionLogRepo
+                       (record/recent), costBasisRepo (get/upsertInitial/bumpRebalanceCount/
+                       resetBaseline)
 
   telegram/
     bot.ts           — Telegraf init, single-chat auth guard, notify()
-    commands.ts      — /status /pnl /analyze /decide /cancel /pause /resume /sched /help
-    countdown.ts     — queueRebalance(), cancelPending(), fire() with countdown timer
+    commands.ts      — /status /pnl /fees /resetbaseline /analyze /decide /cancel
+                       /pause /resume /sched /help
+    countdown.ts     — queueRebalance() (notify → execute inline, no timer);
+                       proposeForApproval()/approveApproval()/rejectApproval()
+                       (inline ✅/❌ buttons for /decide proposals); cancelPending() legacy no-op
 
   cli/
-    status.ts / analyze.ts / decide.ts / pnl.ts
+    status.ts / analyze.ts / decide.ts / pnl.ts / fees.ts / resetBaseline.ts
 ```
 
 ## Pool configuration
@@ -124,7 +137,7 @@ Set `LLM_PROVIDER=gemini|groq|anthropic|claudecli` and the matching `*_API_KEY`.
 
 | Field | Notes |
 |---|---|
-| `action` | `hold\|rebalance\|claim_fees\|pause` — execution signal |
+| `action` | `hold\|rebalance\|claim_fees\|pause` — execution signal. Emitted late in the JSON property order (prompt forces `headline`/`signals`/`scenarios`/`reasoning` first so the model reasons before committing to `action`/`confidence`) |
 | `strategyType` | `Spot\|Curve\|BidAsk` — required when rebalancing. Curve=ranging/mean-reversion, Spot=high vol/breakout, BidAsk=falling knife/catch edges |
 | `lowerBoundPrice` / `upperBoundPrice` | absolute USD floats — required when rebalancing. Executor converts to bin range; derived width must be ∈ [5, 343] or decision is rejected |
 | `confidence` | 0–1 |
@@ -185,6 +198,16 @@ Meteora's `pnlUsd` = (allTimeWithdrawals + currentValue + unclaimedFees) − all
 
 `MODE=dryrun` doesn't affect PnL — Meteora reflects on-chain reality regardless of bot mode.
 
+## True P&L layer (cost-basis baseline)
+
+`src/truePnl.ts` frames PnL against a locally pinned cost-basis baseline (the `cost_basis` table, one row per pool) rather than Meteora's all-time deposit basis. `seedBaselineIfMissing()` runs at boot and before CLI/Telegram PnL so the first deposit is captured once; the baseline is **never** auto-reset on rebalance (`rebalance_count` just increments). `buildTruePnlReport()` measures current value + fees vs that pinned baseline; `formatTruePnlText()` renders it (folded into the `/pnl` + `npm run pnl` report alongside the Meteora view).
+
+**Caveat**: baseline is a first-deposit-only frame — adding capital after the pin makes Principal Health read >100%. Re-anchor with `npm run reset-baseline` or `/resetbaseline` (`resetBaselineToCurrent()`), which re-pins to the current position and snapshots Meteora's cumulative `totalFee` into `fees_withdrawn_offset` so post-reset "fees withdrawn" counts only fees claimed after the reset point. `previewReset()` shows the diff before committing.
+
+## Action cost log
+
+Every executed rebalance records its on-chain cost into the `action_log` table via `actionLogRepo.record` (path, tx count, signatures, SOL tx fees in lamports, SOL price, and — for close+reopen — Jupiter swap direction + in/out USD so slippage is captured). `actionLogRepo.recent()` backs `npm run fees` and the `/fees` Telegram command, letting you judge whether a cycle's fee income outpaces its rebalance cost.
+
 ## SQLite schema
 
 Migrations append-only in `src/state/db.ts` — never edit existing entries.
@@ -194,7 +217,9 @@ Migrations append-only in `src/state/db.ts` — never edit existing entries.
 | `current_pool` | Legacy table (no longer written; kept for schema continuity) |
 | `ohlcv_snapshot` | Cached raw OHLCV candles |
 | `decision` | Every LLM decision with full input/output JSON for replay |
-| `indicator_reading` | Compact 5-field snapshots per (symbol, interval) for LLM delta context |
+| `indicator_reading` | Compact snapshots per (symbol, interval) for LLM delta context (close, rsi14, ema20, ema50, bb_pct_b, macd_hist, atr14) |
+| `cost_basis` | Per-pool True-PnL baseline (initial capital/amounts, sol_price_at_entry, rebalance_count, baseline_pinned_at, fees_withdrawn_offset) |
+| `action_log` | Per-rebalance cost ledger (path, tx_count, signatures, sol_fees_lamports, sol_price_usd, swap direction + in/out USD) |
 
 ## Scheduler jobs
 
