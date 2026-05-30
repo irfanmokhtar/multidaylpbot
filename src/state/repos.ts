@@ -281,6 +281,92 @@ export const indicatorReadingRepo = {
   },
 };
 
+// ─── action_log ──────────────────────────────────────────────────────────────
+
+export interface ActionLogRow {
+  id: number;
+  executedAt: number;
+  pool: string;
+  path: "balanced" | "close-reopen";
+  txCount: number;
+  signatures: string[];
+  solFeesLamports: number;
+  solPriceUsd: number | null;
+  swapDirection: string | null;
+  swapInUsd: number | null;
+  swapOutUsd: number | null;
+}
+
+export const actionLogRepo = {
+  insert(args: {
+    pool: string;
+    path: "balanced" | "close-reopen";
+    signatures: string[];
+    solFeesLamports: number;
+    solPriceUsd: number | null;
+    swapDirection: string | null;
+    swapInUsd: number | null;
+    swapOutUsd: number | null;
+  }): void {
+    getDb()
+      .prepare(
+        `INSERT INTO action_log
+           (executed_at, pool, path, tx_count, signatures_json,
+            sol_fees_lamports, sol_price_usd, swap_direction, swap_in_usd, swap_out_usd)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        Date.now(),
+        args.pool,
+        args.path,
+        args.signatures.length,
+        JSON.stringify(args.signatures),
+        args.solFeesLamports,
+        args.solPriceUsd,
+        args.swapDirection,
+        args.swapInUsd,
+        args.swapOutUsd,
+      );
+  },
+
+  recent(limit = 10): ActionLogRow[] {
+    const rows = getDb()
+      .prepare(
+        `SELECT id, executed_at, pool, path, tx_count, signatures_json,
+                sol_fees_lamports, sol_price_usd, swap_direction, swap_in_usd, swap_out_usd
+         FROM action_log
+         ORDER BY executed_at DESC
+         LIMIT ?`,
+      )
+      .all(limit) as Array<{
+      id: number;
+      executed_at: number;
+      pool: string;
+      path: "balanced" | "close-reopen";
+      tx_count: number;
+      signatures_json: string;
+      sol_fees_lamports: number;
+      sol_price_usd: number | null;
+      swap_direction: string | null;
+      swap_in_usd: number | null;
+      swap_out_usd: number | null;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      executedAt: r.executed_at,
+      pool: r.pool,
+      path: r.path,
+      txCount: r.tx_count,
+      signatures: JSON.parse(r.signatures_json) as string[],
+      solFeesLamports: r.sol_fees_lamports,
+      solPriceUsd: r.sol_price_usd,
+      swapDirection: r.swap_direction,
+      swapInUsd: r.swap_in_usd,
+      swapOutUsd: r.swap_out_usd,
+    }));
+  },
+};
+
 // ─── cost_basis ──────────────────────────────────────────────────────────────
 
 export interface CostBasisRow {

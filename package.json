@@ -13,6 +13,7 @@
     "decide": "tsx src/cli/decide.ts",
     "pnl": "tsx src/cli/pnl.ts",
     "reset-baseline": "tsx src/cli/resetBaseline.ts",
+    "fees": "tsx src/cli/fees.ts",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js"
   },

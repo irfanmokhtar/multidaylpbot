@@ -26,12 +26,46 @@ import {
   rejectApproval,
 } from "./countdown";
 import { loadConfig } from "../config";
+import { actionLogRepo, type ActionLogRow } from "../state/repos";
+
+function formatFeesHtml(rows: ActionLogRow[]): string {
+  if (rows.length === 0) return "<b>Action Cost Log</b>\n\nNo actions recorded yet.";
+
+  const lines: string[] = ["<b>Action Cost Log</b> (last 10)\n"];
+  for (const r of rows) {
+    const dt = new Date(r.executedAt).toISOString().replace("T", " ").slice(0, 16) + " UTC";
+    const solFee = r.solFeesLamports / 1e9;
+    const solFeeUsd =
+      r.solPriceUsd !== null ? ` (<code>$${(solFee * r.solPriceUsd).toFixed(4)}</code>)` : "";
+    let totalCostUsd = r.solPriceUsd !== null ? solFee * r.solPriceUsd : 0;
+
+    const parts: string[] = [
+      `<b>${dt}</b>`,
+      `Path: ${r.path} | TXs: ${r.txCount}`,
+      `TX fees: <code>${solFee.toFixed(7)} SOL</code>${solFeeUsd}`,
+    ];
+
+    if (r.swapDirection && r.swapInUsd !== null && r.swapOutUsd !== null) {
+      const arrow = r.swapDirection === "X_TO_Y" ? "X→Y" : "Y→X";
+      const cost = r.swapInUsd - r.swapOutUsd;
+      totalCostUsd += cost;
+      parts.push(
+        `Swap: ${arrow} <code>$${r.swapInUsd.toFixed(2)} → $${r.swapOutUsd.toFixed(2)}</code> (cost: <code>$${cost.toFixed(4)}</code>)`,
+      );
+    }
+
+    parts.push(`Total cost: <code>~$${totalCostUsd.toFixed(4)}</code>`);
+    lines.push(parts.join("\n"));
+  }
+  return lines.join("\n\n");
+}
 
 const HELP_TEXT = `<b>multidaylpbot</b> — Meteora DLMM SOL/USDC manager
 
 <b>Available commands</b>
 /status   — current pool, active bin, and your position(s)
 /pnl      — fees collected + total USD PnL vs cost basis (via Meteora indexer)
+/fees     — Solana tx fees + swap costs for recent rebalance actions
 /resetbaseline — re-anchor the True P&L baseline to the current position
 /analyze  — raw indicator pass (OHLCV + RSI/EMA/BB/MACD/ATR; no LLM)
 /decide   — full analyzer pass + approval prompt when rebalance recommended (MODE=live)
@@ -71,6 +105,18 @@ export function registerCommands(bot: Telegraf): void {
           err instanceof Error ? err.message : "unknown error"
         }`,
       );
+    }
+  });
+
+  bot.command("fees", async (ctx) => {
+    try {
+      const rows = actionLogRepo.recent(10);
+      await ctx.replyWithHTML(formatFeesHtml(rows), {
+        link_preview_options: { is_disabled: true },
+      });
+    } catch (err) {
+      logger.error({ err: err instanceof Error ? err.message : err }, "/fees failed");
+      await ctx.reply(`⚠️ Failed: ${err instanceof Error ? err.message : "unknown error"}`);
     }
   });
 

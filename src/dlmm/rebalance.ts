@@ -49,7 +49,7 @@ import { loadWallet } from "../wallet";
 import { resolveToken } from "../tokens";
 import { swapTokensToTargetRatio, type SwapResult } from "../swap/jupiter";
 import { getDlmmPool } from "./client";
-import { costBasisRepo } from "../state/repos";
+import { costBasisRepo, actionLogRepo } from "../state/repos";
 import { deriveTargetXWeight, currentXWeight } from "./composition";
 import { mapStrategyType, priceBoundsToWindow, type PriceBoundsWindow } from "./strategy";
 import type { Decision } from "../ai/types";
@@ -103,6 +103,7 @@ export async function executeRebalance(decision: Decision): Promise<RebalanceExe
   const cfg = loadConfig();
   const pool = await getDlmmPool();
   const wallet = loadWallet();
+  const connection = getConnection();
 
   // The pool object is a boot-time singleton (getDlmmPool caches DLMM.create).
   // getActiveBin() reads activeId fresh but does NOT sync pool.lbPair.activeId
@@ -220,17 +221,19 @@ export async function executeRebalance(decision: Decision): Promise<RebalanceExe
     );
   }
 
-  if (path === "balanced") {
-    const r = await executeBalancedRebalance(decision, position, activeBin.binId, window);
-    r.targetXWeight = target.xWeight;
-    r.currentXWeight = current.xWeight;
-    bumpRebalanceCount(pool.pubkey.toBase58());
-    return r;
-  }
-  const r = await executeCloseAndReopen(decision, position, activeBin.binId, window);
+  const r =
+    path === "balanced"
+      ? await executeBalancedRebalance(decision, position, activeBin.binId, window)
+      : await executeCloseAndReopen(decision, position, activeBin.binId, window);
   r.targetXWeight = target.xWeight;
   r.currentXWeight = current.xWeight;
   bumpRebalanceCount(pool.pubkey.toBase58());
+  logActionCost(r, pool, connection).catch((err) => {
+    logger.warn(
+      { err: err instanceof Error ? err.message : err },
+      "action-log: cost logging failed",
+    );
+  });
   return r;
 }
 
@@ -775,6 +778,73 @@ async function executeCloseAndReopen(
     underfunded,
     swap,
   };
+}
+
+// ─── action cost logging ──────────────────────────────────────────────────────
+
+async function fetchTotalTxFeeLamports(
+  signatures: string[],
+  connection: ReturnType<typeof getConnection>,
+): Promise<number> {
+  if (signatures.length === 0) return 0;
+  const results = await Promise.all(
+    signatures.map((sig) =>
+      connection
+        .getTransaction(sig, { commitment: "confirmed", maxSupportedTransactionVersion: 0 })
+        .catch(() => null),
+    ),
+  );
+  return results.reduce((sum, tx) => sum + (tx?.meta?.fee ?? 0), 0);
+}
+
+async function logActionCost(
+  r: RebalanceExecution,
+  pool: Awaited<ReturnType<typeof getDlmmPool>>,
+  connection: ReturnType<typeof getConnection>,
+): Promise<void> {
+  const solFeesLamports = await fetchTotalTxFeeLamports(r.signatures, connection);
+  const activePriceStr = (await pool.getActiveBin()).pricePerToken;
+  const solPrice = parseFloat(activePriceStr);
+  const xDec = pool.tokenX.mint.decimals;
+  const yDec = pool.tokenY.mint.decimals;
+  const yIsStable = resolveToken(pool.tokenY.publicKey.toBase58()).isStablecoin;
+
+  let swapDirection: string | null = null;
+  let swapInUsd: number | null = null;
+  let swapOutUsd: number | null = null;
+  if (r.swap?.direction && r.swap.direction !== "NONE" && r.swap.signature) {
+    swapDirection = r.swap.direction;
+    if (r.swap.direction === "X_TO_Y") {
+      swapInUsd = (Number(r.swap.inAmount.toString()) / 10 ** xDec) * solPrice;
+      swapOutUsd = yIsStable ? Number(r.swap.outAmount.toString()) / 10 ** yDec : null;
+    } else {
+      swapInUsd = yIsStable ? Number(r.swap.inAmount.toString()) / 10 ** yDec : null;
+      swapOutUsd = (Number(r.swap.outAmount.toString()) / 10 ** xDec) * solPrice;
+    }
+  }
+
+  actionLogRepo.insert({
+    pool: pool.pubkey.toBase58(),
+    path: r.path,
+    signatures: r.signatures,
+    solFeesLamports,
+    solPriceUsd: solPrice,
+    swapDirection,
+    swapInUsd,
+    swapOutUsd,
+  });
+  logger.info(
+    {
+      path: r.path,
+      txCount: r.signatures.length,
+      solFeesLamports,
+      solPriceUsd: round3(solPrice),
+      swapDirection,
+      swapInUsd: swapInUsd !== null ? round3(swapInUsd) : null,
+      swapOutUsd: swapOutUsd !== null ? round3(swapOutUsd) : null,
+    },
+    "action-log: costs recorded",
+  );
 }
 
 // ─── tx helpers ──────────────────────────────────────────────────────────────

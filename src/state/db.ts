@@ -81,6 +81,23 @@ const MIGRATIONS: string[] = [
   //    position and snapshot Meteora's cumulative totalFee here, so post-reset
   //    "fees withdrawn" counts only fees claimed AFTER the reset point.
   `ALTER TABLE cost_basis ADD COLUMN fees_withdrawn_offset REAL NOT NULL DEFAULT 0;`,
+  // 7: per-action cost log. Tracks Solana tx fees (lamports) and Jupiter swap
+  //    slippage for every rebalance so we can evaluate if cycles pay off.
+  `CREATE TABLE IF NOT EXISTS action_log (
+     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+     executed_at         INTEGER NOT NULL,
+     pool                TEXT    NOT NULL,
+     path                TEXT    NOT NULL,   -- 'balanced' | 'close-reopen'
+     tx_count            INTEGER NOT NULL DEFAULT 0,
+     signatures_json     TEXT    NOT NULL DEFAULT '[]',
+     sol_fees_lamports   INTEGER NOT NULL DEFAULT 0,
+     sol_price_usd       REAL,
+     swap_direction      TEXT,               -- 'X_TO_Y' | 'Y_TO_X' | null
+     swap_in_usd         REAL,
+     swap_out_usd        REAL
+   );
+   CREATE INDEX IF NOT EXISTS idx_action_log_executed_at
+     ON action_log(executed_at DESC);`,
 ];
 
 export function getDb(): Database.Database {
