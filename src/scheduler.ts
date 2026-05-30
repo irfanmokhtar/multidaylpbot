@@ -7,8 +7,8 @@
  *   health   — read-only position check; alerts ONLY when out of range
  *
  * No on-chain execution happens here. If the analyzer recommends rebalance/
- * bootstrap/switch/claim_fees, the scheduler still just *reports* the decision
- * to Telegram — the executors land in Phases 5/6/7.
+ * pause, the scheduler still just *reports* the decision to Telegram — the
+ * executors land in Phases 5/6/7.
  *
  * A module-level `paused` flag (toggled by /pause and /resume) short-circuits
  * each tick's body; cron jobs themselves keep running so /resume picks up at

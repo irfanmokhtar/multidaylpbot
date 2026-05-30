@@ -112,6 +112,8 @@ async function buildDecisionInput(cycle: CycleType): Promise<DecisionInput> {
         ema20: pack.ema20,
         bbPctB: pack.bb?.pctB ?? null,
         macdHist: pack.macd?.histogram ?? null,
+        atr14: pack.atr14,
+        ema50: pack.ema50,
       });
     } catch (err) {
       logger.warn(
@@ -163,10 +165,17 @@ async function buildDecisionInput(cycle: CycleType): Promise<DecisionInput> {
         activeBinPrice: parseFloat(snap.activeBinPrice),
       };
       const priceY = parseFloat(snap.activeBinPrice);
+      const stepFactor = 1 + snap.binStep / 10000;
       positions = snap.positions.map((p) => {
         const valueUsd = snap.tokenY.isStablecoin
           ? (p.totalX + p.feeX) * priceY + (p.totalY + p.feeY)
           : null;
+        // USD bounds from bin IDs: price(bin) = activePrice × stepFactor^(bin − activeBin).
+        const lowerPriceUsd = priceY * stepFactor ** (p.lowerBinId - snap.activeBinId);
+        const upperPriceUsd = priceY * stepFactor ** (p.upperBinId - snap.activeBinId);
+        const binsToLowerEdge = snap.activeBinId - p.lowerBinId;
+        const binsToUpperEdge = p.upperBinId - snap.activeBinId;
+        const activeBinOffsetPct = p.width > 1 ? binsToLowerEdge / (p.width - 1) : 0;
         return {
           lowerBinId: p.lowerBinId,
           upperBinId: p.upperBinId,
@@ -177,6 +186,11 @@ async function buildDecisionInput(cycle: CycleType): Promise<DecisionInput> {
           valueUsd,
           tokenX: { symbol: snap.tokenX.symbol },
           tokenY: { symbol: snap.tokenY.symbol },
+          lowerPriceUsd,
+          upperPriceUsd,
+          activeBinOffsetPct,
+          binsToLowerEdge,
+          binsToUpperEdge,
         };
       });
     } catch (err) {

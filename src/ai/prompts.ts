@@ -10,70 +10,16 @@ import type { DecisionInput } from "./types";
 // JSON Schema for the Decision shape. Required by provider structured-output
 // features. signals + scenarios are not in `required` — cycle branching in the
 // system prompt handles the conditional obligation.
+// Property order is deliberate: reasoning/analysis fields come FIRST, execution
+// fields (action + bounds) LAST. Most models generate keys in declared order, so
+// this forces reason-before-decide rather than decide-then-justify.
 export const DECISION_JSON_SCHEMA = {
   type: "object",
-  required: ["action", "confidence", "headline", "dlmm", "reasoning", "lowerBoundPrice", "upperBoundPrice"],
+  required: ["headline", "reasoning", "dlmm", "action", "confidence", "lowerBoundPrice", "upperBoundPrice"],
   properties: {
-    action: {
-      type: "string",
-      enum: ["hold", "rebalance", "claim_fees", "pause"],
-      description:
-        "Execution action. Must match dlmm.verb: HOLD→hold, ROLL/OPEN→rebalance, CLOSE→pause.",
-    },
-    strategyType: {
-      type: "string",
-      enum: ["Spot", "Curve", "BidAsk"],
-      description:
-        "Required when action='rebalance'. Curve=ranging/mean-reversion, " +
-        "Spot=high vol/breakout/undecided, BidAsk=falling-knife/catch-edges.",
-    },
-    lowerBoundPrice: {
-      type: ["number", "null"],
-      description:
-        "Absolute USD price of the LOWER bound — pin to a real TA level (support, EMA, swing low). " +
-        "Set to a positive number when action='rebalance'; set null otherwise.",
-    },
-    upperBoundPrice: {
-      type: ["number", "null"],
-      description:
-        "Absolute USD price of the UPPER bound — pin to a real TA level (resistance, EMA, swing high). " +
-        "Must exceed lowerBoundPrice when action='rebalance'; set null otherwise.",
-    },
-    confidence: {
-      type: "number",
-      minimum: 0,
-      maximum: 1,
-      description: "Self-reported confidence (0=guess, 1=certain).",
-    },
-    keyLevels: {
-      type: "object",
-      properties: {
-        support: { type: ["number", "null"] },
-        resistance: { type: ["number", "null"] },
-      },
-    },
     headline: {
       type: "string",
       description: "1–2 sentences, max 300 characters. The single most important development this cycle.",
-    },
-    dlmm: {
-      type: "object",
-      required: ["verb", "detail"],
-      properties: {
-        verb: {
-          type: "string",
-          enum: ["HOLD", "ROLL", "OPEN", "CLOSE"],
-          description: "HOLD=no change; ROLL=re-center existing range; OPEN=close+reopen at new bounds; CLOSE=exit position.",
-        },
-        detail: {
-          type: "string",
-          description: "1-line action description with exact bounds, e.g. 'Roll to $185–$215, BidAsk'.",
-        },
-      },
-    },
-    reasoning: {
-      type: "string",
-      description: "HARD LIMIT: ≤1500 chars (enforced; longer responses are rejected). Be terse and dense — drop filler, hedging, restated obvious facts. Keep every critical signal value, regime call, and the why behind the action, but cut prose. Aim for ~1000 chars; never exceed 1500.",
     },
     signals: {
       type: "array",
@@ -99,6 +45,63 @@ export const DECISION_JSON_SCHEMA = {
         base: { $ref: "#/$defs/Scenario" },
         bear: { $ref: "#/$defs/Scenario" },
       },
+    },
+    keyLevels: {
+      type: "object",
+      properties: {
+        support: { type: ["number", "null"] },
+        resistance: { type: ["number", "null"] },
+      },
+    },
+    reasoning: {
+      type: "string",
+      description: "HARD LIMIT: ≤1500 chars (enforced; longer responses are rejected). Be terse and dense — drop filler, hedging, restated obvious facts. Keep every critical signal value, regime call, and the why behind the action, but cut prose. Aim for ~1000 chars; never exceed 1500.",
+    },
+    dlmm: {
+      type: "object",
+      required: ["verb", "detail"],
+      properties: {
+        verb: {
+          type: "string",
+          enum: ["HOLD", "ROLL", "OPEN", "CLOSE"],
+          description: "HOLD=no change; ROLL=re-center existing range; OPEN=close+reopen at new bounds; CLOSE=exit position.",
+        },
+        detail: {
+          type: "string",
+          description: "1-line action description with exact bounds, e.g. 'Roll to $185–$215, BidAsk'.",
+        },
+      },
+    },
+    strategyType: {
+      type: "string",
+      enum: ["Spot", "Curve", "BidAsk"],
+      description:
+        "Required when action='rebalance'. Curve=ranging/mean-reversion, " +
+        "Spot=high vol/breakout/undecided, BidAsk=falling-knife/catch-edges.",
+    },
+    lowerBoundPrice: {
+      type: ["number", "null"],
+      description:
+        "Absolute USD price of the LOWER bound — pin to a real TA level (support, EMA, swing low). " +
+        "Set to a positive number when action='rebalance'; set null otherwise.",
+    },
+    upperBoundPrice: {
+      type: ["number", "null"],
+      description:
+        "Absolute USD price of the UPPER bound — pin to a real TA level (resistance, EMA, swing high). " +
+        "Must exceed lowerBoundPrice when action='rebalance'; set null otherwise.",
+    },
+    action: {
+      type: "string",
+      enum: ["hold", "rebalance", "pause"],
+      description:
+        "Execution action. Must match dlmm.verb: HOLD→hold, ROLL/OPEN→rebalance, CLOSE→pause.",
+    },
+    confidence: {
+      type: "number",
+      minimum: 0,
+      maximum: 1,
+      description: "Self-reported confidence (0=guess, 1=certain).",
     },
   },
   $defs: {
@@ -146,8 +149,11 @@ ANALYSIS TASKS (every cycle):
 2. Map EMA stack per timeframe; flag imminent or completed crossovers.
 3. Bollinger Band state: squeeze, expansion, %B overextension, mean reversion.
 4. MACD histogram direction + zero-line crossovers per timeframe.
-5. (daily/ad_hoc only) Surface 3–6 key signals classified bullish / bearish / caution / structural.
-6. (daily/ad_hoc only) Three scenarios (bull / base / bear) with probabilities summing to 100.
+5. Volume confirmation: compare volume to volumeSma20. A breakout or trend move on \
+sub-average volume is a fade, not conviction — favor mean-reversion (Curve) there. \
+Above-average volume validates breakouts → Spot/BidAsk. Use this to gate strategy choice.
+6. (daily/ad_hoc only) Surface 3–6 key signals classified bullish / bearish / caution / structural.
+7. (daily/ad_hoc only) Three scenarios (bull / base / bear) with probabilities summing to 100.
 
 STRATEGY MAPPING (use these definitions, not generic intuition):
   Curve   = ranging / mean-reversion regime (low ATR, BB squeeze, RSI \
@@ -173,11 +179,32 @@ from the current price. Asymmetric bounds (bullish/bearish skew) are encouraged.
   - The executor converts your prices to bins and enforces width ∈ [5, 343]. \
 If your bounds derive a width outside that band the decision is REJECTED.
 
+RANGE WIDTH ECONOMICS (the core fee-farming tradeoff):
+  - Fees accrue ONLY when the active bin is inside the range, and per-bin fee \
+density is HIGHER the narrower the range (same liquidity over fewer bins). So \
+narrow = more fees/hour BUT shorter time-in-range before price exits and fees stop.
+  - Wide = fewer fees/hour but survives volatility without going out of range. \
+Pick width to match volatility: scale it to atrPct (ATR as % of price). High atrPct \
+or expanding BB → widen; low atrPct / BB squeeze → tighten and farm the chop.
+  - Every rebalance costs real SOL tx fees + (on close+reopen) Jupiter swap \
+slippage. Only ROLL/OPEN when expected incremental fees over the next 12–24h \
+clearly beat that cost. Use pool apr24h / feeTvlRatio24hPct to judge whether the \
+pool earns enough to justify tight farming at all — a low-APR pool is not worth \
+chasing with frequent narrow re-centers.
+  - Honor your own recent decisions (recentDecisions) — do not flip-flop range on \
+noise; it just bleeds fees + slippage.
+
+Position drift is PRE-COMPUTED for you per position: activeBinOffsetPct \
+(0=lower edge, 1=upper edge), binsToLowerEdge / binsToUpperEdge, and lowerPriceUsd \
+/ upperPriceUsd (your current range in USD). Read these directly — do not re-derive \
+from bin IDs.
+
 Hold vs rebalance heuristics:
   - In-range + no regime flip → HOLD. Rebalancing has real on-chain cost.
-  - Active bin drifting toward an edge OR volatility regime shift (ATR jump, \
-BB expansion) → ROLL with new bounds straddling the new center.
-  - Tight range + breakout signal → OPEN (wider bounds, BidAsk).
+  - activeBinOffsetPct near 0 or 1 (active bin hugging an edge) OR volatility \
+regime shift (ATR/atrPct jump, BB expansion) → ROLL with new bounds straddling the \
+new center.
+  - Tight range + breakout signal confirmed by volume → OPEN (wider bounds, BidAsk).
   - Heavy signal conflict or thesis broken → CLOSE / pause.`;
 
 /**
@@ -213,6 +240,7 @@ function buildPriceBoundExamples(
   return [
     `Price-bound guidance for this pool (${binStep} bps bin step, active $${activeBinPrice.toFixed(2)}):`,
     ...lines,
+    `These %-tiers are starting points, not fixed buckets — scale the actual width to current volatility (indicators.atrPct). Higher atrPct → lean wider; lower → lean narrower.`,
     `Bounds are absolute USD prices — pin them to real TA levels (S/R, EMA, swing).`,
     `Asymmetric bounds are encouraged (bullish: skew upper higher; bearish: skew lower lower).`,
     `Hard constraint: derived bin width must satisfy 5 ≤ width ≤ 343 — otherwise the decision is REJECTED.`,

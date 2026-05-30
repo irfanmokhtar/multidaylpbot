@@ -17,7 +17,6 @@ export type StrategyType = z.infer<typeof StrategyType>;
 export const Action = z.enum([
   "hold",
   "rebalance",
-  "claim_fees",
   "pause",
 ]);
 export type Action = z.infer<typeof Action>;
@@ -66,30 +65,31 @@ export const DlmmSuggestion = z.object({
 export type DlmmSuggestion = z.infer<typeof DlmmSuggestion>;
 
 export const Decision = z.object({
+  // Field order mirrors DECISION_JSON_SCHEMA: reason-then-act (analysis fields
+  // first, execution fields last) so the model reasons before committing.
+
+  // — TA / reasoning fields —
+  /** 1–2 sentence top-line: the single most important development this cycle. */
+  headline: z.string().min(10).transform((s) => s.slice(0, 300)),
+  /** 3–6 key signals ranked by importance. Omit on intraday cycles to save tokens. */
+  signals: z.array(Signal).min(3).max(6).optional(),
+  /** Bull/base/bear scenarios summing to 100%. Omit on intraday cycles. */
+  scenarios: Scenarios.optional(),
+  keyLevels: KeyLevels.optional(),
+  /** ≤1500 char narrative tying signals into a coherent picture (hard cap 2500 to absorb minor overruns). */
+  reasoning: z.string().min(20).max(2500),
+
   // — execution-layer fields (read by rebalance.ts / scheduler.ts — do not remove) —
-  action: Action,
+  /** Mandatory DLMM verdict with verb + 1-line detail. */
+  dlmm: DlmmSuggestion,
   /** Required when action="rebalance"; ignored otherwise. */
   strategyType: StrategyType.nullable().optional(),
   /** Absolute USD price of the lower bound. Required when action="rebalance"; null otherwise. */
   lowerBoundPrice: z.number().positive().nullable().optional(),
   /** Absolute USD price of the upper bound. Required when action="rebalance"; null otherwise. Must exceed lowerBoundPrice. */
   upperBoundPrice: z.number().positive().nullable().optional(),
+  action: Action,
   confidence: z.number().min(0).max(1),
-  keyLevels: KeyLevels.optional(),
-
-  // — always-required TA fields —
-  /** 1–2 sentence top-line: the single most important development this cycle. */
-  headline: z.string().min(10).transform((s) => s.slice(0, 300)),
-  /** Mandatory DLMM verdict with verb + 1-line detail. */
-  dlmm: DlmmSuggestion,
-  /** ≤1500 char narrative tying signals into a coherent picture (hard cap 2500 to absorb minor overruns). */
-  reasoning: z.string().min(20).max(2500),
-
-  // — rich TA fields — required on daily/ad_hoc by system prompt; optional for intraday —
-  /** 3–6 key signals ranked by importance. Omit on intraday cycles to save tokens. */
-  signals: z.array(Signal).min(3).max(6).optional(),
-  /** Bull/base/bear scenarios summing to 100%. Omit on intraday cycles. */
-  scenarios: Scenarios.optional(),
 }).refine(
   (d) =>
     d.action !== "rebalance" ||
@@ -116,6 +116,8 @@ export interface PriorReading {
   ema20: number | null;
   bbPctB: number | null;
   macdHist: number | null;
+  atr14: number | null;
+  ema50: number | null;
 }
 
 export interface DecisionInput {
@@ -140,6 +142,14 @@ export interface DecisionInput {
     valueUsd: number | null;
     tokenX: { symbol: string };
     tokenY: { symbol: string };
+    /** Pre-computed USD bounds of this position (from bin IDs × bin step). */
+    lowerPriceUsd: number | null;
+    upperPriceUsd: number | null;
+    /** Active-bin position within range: 0=lower edge, 1=upper edge (outside [0,1] when out of range). */
+    activeBinOffsetPct: number | null;
+    /** Bins between the active bin and each edge (negative = active bin past that edge). */
+    binsToLowerEdge: number | null;
+    binsToUpperEdge: number | null;
   }>;
   indicators: {
     "1H": IndicatorPack | null;

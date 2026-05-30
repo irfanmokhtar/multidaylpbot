@@ -216,12 +216,14 @@ export const indicatorReadingRepo = {
     ema20: number | null;
     bbPctB: number | null;
     macdHist: number | null;
+    atr14: number | null;
+    ema50: number | null;
   }): void {
     getDb()
       .prepare(
         `INSERT INTO indicator_reading
-           (symbol, interval, taken_at, close, rsi14, ema20, bb_pct_b, macd_hist)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (symbol, interval, taken_at, close, rsi14, ema20, bb_pct_b, macd_hist, atr14, ema50)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         args.symbol,
@@ -232,6 +234,8 @@ export const indicatorReadingRepo = {
         args.ema20,
         args.bbPctB,
         args.macdHist,
+        args.atr14,
+        args.ema50,
       );
   },
 
@@ -239,7 +243,7 @@ export const indicatorReadingRepo = {
   recent(symbol: string, interval: string, limit: number): PriorReading[] {
     const rows = getDb()
       .prepare(
-        `SELECT taken_at, close, rsi14, ema20, bb_pct_b, macd_hist
+        `SELECT taken_at, close, rsi14, ema20, bb_pct_b, macd_hist, atr14, ema50
          FROM indicator_reading
          WHERE symbol = ? AND interval = ?
          ORDER BY taken_at DESC LIMIT ?`,
@@ -251,6 +255,8 @@ export const indicatorReadingRepo = {
         ema20: number | null;
         bb_pct_b: number | null;
         macd_hist: number | null;
+        atr14: number | null;
+        ema50: number | null;
       }>;
     return rows.map((r) => ({
       takenAt: r.taken_at,
@@ -259,6 +265,8 @@ export const indicatorReadingRepo = {
       ema20: r.ema20,
       bbPctB: r.bb_pct_b,
       macdHist: r.macd_hist,
+      atr14: r.atr14,
+      ema50: r.ema50,
     }));
   },
 

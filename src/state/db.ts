@@ -98,6 +98,10 @@ const MIGRATIONS: string[] = [
    );
    CREATE INDEX IF NOT EXISTS idx_action_log_executed_at
      ON action_log(executed_at DESC);`,
+  // 8: extend indicator_reading with ATR + EMA50 so prior-reading deltas can
+  //    track volatility-regime shifts and EMA-stack compression over time.
+  `ALTER TABLE indicator_reading ADD COLUMN atr14 REAL;
+   ALTER TABLE indicator_reading ADD COLUMN ema50 REAL;`,
 ];
 
 export function getDb(): Database.Database {

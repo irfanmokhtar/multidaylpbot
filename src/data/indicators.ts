@@ -22,6 +22,8 @@ export interface IndicatorPack {
   bb: { upper: number; middle: number; lower: number; pctB: number } | null;
   macd: { macd: number; signal: number; histogram: number } | null;
   atr14: number | null;
+  /** ATR as a fraction of close (atr14/close) — vol regime, comparable across price levels. */
+  atrPct: number | null;
 
   /** Latest closed-candle volume. */
   volume: number | null;
@@ -130,6 +132,7 @@ export function computeIndicators(candles: Candle[]): IndicatorPack {
     bb,
     macd,
     atr14,
+    atrPct: atr14 !== null && close > 0 ? atr14 / close : null,
     volume,
     volumeSma20,
     trend: {
