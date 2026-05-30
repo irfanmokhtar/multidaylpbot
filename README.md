@@ -1,13 +1,13 @@
 # Meteora DLMM LP Bot
 
-Autonomous LP manager for a single [Meteora DLMM](https://app.meteora.ag) pool. A Node.js process polls OHLCV data and on-chain position state, asks an LLM for a rebalance decision, notifies via Telegram with a countdown, then executes on-chain.
+Autonomous LP manager for a single [Meteora DLMM](https://app.meteora.ag) pool. A Node.js process polls OHLCV data and on-chain position state, asks an LLM for a rebalance decision, sends the proposal to Telegram for approval, then executes on-chain. Backend-only: Telegram control plane + CLI tools, no web dashboard.
 
 ## What it does
 
-1. **TA cycle** — fetches 1H/4H/1D OHLCV from Birdeye, computes RSI/EMA/BB/MACD/ATR, pulls BTC macro context, reads your open DLMM position, and sends everything to an LLM.
+1. **TA cycle** — fetches 1H/4H/1D OHLCV from Birdeye, computes RSI/EMA/BB/MACD/ATR + volume, pulls BTC macro context, reads your open DLMM position, and sends everything to an LLM.
 2. **Decision** — LLM returns a structured `Decision` (`hold | rebalance | claim_fees | pause`) with price bounds, strategy type, and reasoning.
-3. **Execution** — on `rebalance`, the bot queues a Telegram countdown. After confirmation it closes + reopens the position (or balanced re-centers if the shift is minor), swapping via Jupiter Ultra to align composition with the target range.
-4. **Dashboard** — read-only web UI at `http://127.0.0.1:3001` showing KPIs, position range, indicators, decision history, and PnL.
+3. **Execution** — on `rebalance` (MODE=live), the bot sends an approval prompt to Telegram. After you approve it closes + reopens the position (or balanced re-centers if the shift is minor), swapping via Jupiter Ultra to align composition with the target range. Each rebalance's tx fees + swap cost are logged.
+4. **Reporting** — Meteora-indexed USD PnL plus a local cost-basis "True P&L" baseline, surfaced over Telegram (`/pnl`, `/fees`) and CLI (`npm run pnl`, `npm run fees`).
 
 ## Requirements
 
@@ -24,7 +24,6 @@ Autonomous LP manager for a single [Meteora DLMM](https://app.meteora.ag) pool. 
 git clone <repo>
 cd multidaylpbot
 npm install
-cd web && npm install && cd ..
 cp .env.example .env
 # edit .env — see Configuration below
 ```
@@ -65,7 +64,6 @@ MODE=live     # enables on-chain rebalance after Telegram countdown
 
 ```env
 MAX_DEPLOY_USD=100              # cap on USD deployed per close+reopen
-COUNTDOWN_SEC=60                # seconds before executing a queued rebalance
 REBALANCE_SLIPPAGE_PCT=1.0      # slippage tolerance on rebalance txs
 WIDTH_CHANGE_TOLERANCE_BINS=5   # bin-width delta below which re-center is used instead of close+reopen
 SWAP_ENABLED=true               # swap via Jupiter Ultra to align composition before reopening
@@ -85,29 +83,19 @@ CRON_TZ=Asia/Kuala_Lumpur       # empty = system local time
 ## Running
 
 ```bash
-npm run dev          # start bot + dashboard (live-reload via tsx watch)
+npm run dev          # start bot (live-reload via tsx watch)
 npm run start        # run compiled build (npm run build first)
 ```
 
 One-shot CLI tools (no bot required):
 
 ```bash
-npm run status       # current pool + position state
-npm run analyze      # indicator pass (no LLM)
-npm run decide       # full analyzer pass including LLM decision
-npm run pnl          # fees + USD PnL from Meteora indexer
-```
-
-## Dashboard
-
-Starts automatically with `npm run dev`. Accessible at `http://127.0.0.1:3001`.
-
-Pages: Overview · Decisions · Indicators (1H/4H/1D) · Schedule · PnL
-
-For frontend development:
-
-```bash
-npm run dev:web      # Vite dev server at :5174, proxies /api → :3001
+npm run status         # current pool + position state
+npm run analyze        # indicator pass (no LLM)
+npm run decide         # full analyzer pass including LLM decision
+npm run pnl            # fees + USD PnL (Meteora indexer) + True P&L cost-basis view
+npm run fees           # recent rebalance costs (tx fees + swap slippage)
+npm run reset-baseline # re-anchor the True P&L baseline to the current position
 ```
 
 ## Telegram commands
@@ -116,11 +104,13 @@ npm run dev:web      # Vite dev server at :5174, proxies /api → :3001
 |---|---|
 | `/status` | Pool snapshot + position state |
 | `/analyze` | Run indicator pass + LLM decision |
-| `/decide` | Run full analysis and queue rebalance if recommended |
-| `/cancel` | Cancel pending rebalance countdown |
+| `/decide` | Run full analysis; send approval prompt if rebalance recommended (MODE=live) |
+| `/pnl` | Fees + USD PnL + True P&L (cost-basis) report |
+| `/fees` | Recent rebalance costs — tx fees + Jupiter swap slippage |
+| `/resetbaseline` | Re-anchor the True P&L baseline to the current position |
+| `/cancel` | Legacy no-op (execution is immediate once approved) |
 | `/pause` / `/resume` | Pause or resume scheduled jobs |
-| `/sched` | Show next run times for all jobs |
-| `/pnl` | Fees + USD PnL report |
+| `/sched` | Show scheduler state + next run times |
 | `/help` | Command reference |
 
 ## Architecture
@@ -129,16 +119,15 @@ npm run dev:web      # Vite dev server at :5174, proxies /api → :3001
 src/
   index.ts          — boot: config → wallet → DLMM → bot → scheduler
   scheduler.ts      — three cron jobs: daily-ta, intraday-ta, hourly-check
+  pnlReport.ts      — Meteora-indexed PnL report
+  truePnl.ts        — cost-basis baseline + True P&L report + reset
   ai/               — LLM providers + analyzer + prompt builders
   dlmm/             — position snapshot, rebalance dispatcher, strategy + composition
   swap/             — Jupiter Ultra v1 swap orchestrator
   data/             — Birdeye OHLCV, Meteora API + PnL indexer, indicator compute
-  telegram/         — Telegraf bot, commands, countdown executor
-  web/              — Fastify API server + static SPA serving
+  telegram/         — Telegraf bot, commands, approval executor
   state/            — SQLite (better-sqlite3) schema + repos
   cli/              — one-shot entry points
-
-web/                — Vite + React frontend
 ```
 
 Full architecture details and design rationale are in `CLAUDE.md` and `PLAN.md`.
@@ -149,6 +138,7 @@ Full architecture details and design rationale are in `CLAUDE.md` and `PLAN.md`.
 - `MAX_DEPLOY_USD` — caps USD deployed on close+reopen
 - `SOL_RESERVE_LAMPORTS` — 0.05 SOL always held back from redeposit
 - `MODE=dryrun` — default; no on-chain execution, ever
+- `/decide` proposals require explicit Telegram approval (✅/❌ buttons) before executing
 - Rebalance execution gated to a single position (throws if `userPositions.length > 1`)
 
 ## SQLite inspection
@@ -156,6 +146,9 @@ Full architecture details and design rationale are in `CLAUDE.md` and `PLAN.md`.
 ```bash
 sqlite3 ./data/bot.db "SELECT decided_at, cycle, action, confidence FROM decision ORDER BY decided_at DESC LIMIT 10"
 sqlite3 ./data/bot.db "SELECT symbol, interval, datetime(taken_at/1000,'unixepoch'), close, rsi14 FROM indicator_reading ORDER BY taken_at DESC LIMIT 20"
+
+# Rebalance cost ledger
+sqlite3 ./data/bot.db "SELECT datetime(executed_at/1000,'unixepoch'), path, tx_count, sol_fees_lamports FROM action_log ORDER BY executed_at DESC LIMIT 10"
 ```
 
 ## License
