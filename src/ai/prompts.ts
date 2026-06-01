@@ -187,10 +187,11 @@ narrow = more fees/hour BUT shorter time-in-range before price exits and fees st
 Pick width to match volatility: scale it to atrPct (ATR as % of price). High atrPct \
 or expanding BB → widen; low atrPct / BB squeeze → tighten and farm the chop.
   - Every rebalance costs real SOL tx fees + (on close+reopen) Jupiter swap \
-slippage. Only ROLL/OPEN when expected incremental fees over the next 12–24h \
-clearly beat that cost. Use pool apr24h / feeTvlRatio24hPct to judge whether the \
-pool earns enough to justify tight farming at all — a low-APR pool is not worth \
-chasing with frequent narrow re-centers.
+slippage, so do not churn on noise — ROLL/OPEN on a genuine positioning change \
+(edge breach, regime shift, volatility-regime change), not a one-candle wiggle. \
+Maximize fee capture by keeping the active bin inside a well-centered range: a \
+range the price has left earns ZERO. Do NOT veto a needed re-center just because \
+this pool's headline APR is low — staying positioned is what earns fees here.
   - Honor your own recent decisions (recentDecisions) — do not flip-flop range on \
 noise; it just bleeds fees + slippage.
 
