@@ -225,8 +225,8 @@ Migrations append-only in `src/state/db.ts` — never edit existing entries.
 
 | Job name | Default cron | Behavior |
 |---|---|---|
-| `daily-ta` | `0 8,21 * * *` | Full TA + LLM decision + Telegram report (always notifies) |
-| `intraday-ta` | `0 0,4,12,16 * * *` | Light TA; notifies only if `action ≠ hold`. On hold, logs full `reasoning` + `headline` + `dlmm` verb/detail at info level (no truncation) |
+| `daily-ta` | `0 8,21 * * *` | Full TA + LLM decision; always notifies Telegram + logs full `action`/`confidence`/`headline`/`reasoning`/`dlmm` at info level |
+| `intraday-ta` | `0 0,4,12,16 * * *` | Light TA; always notifies Telegram + logs full `action`/`confidence`/`headline`/`reasoning`/`dlmm` at info level (every cycle, including `hold`) |
 | `hourly-check` | `0 * * * *` | Checks SOL balance (alerts below 0.1 SOL), sends full status report if pool set, alerts if any position is out of range |
 
 Pause/resume via `/pause` and `/resume` Telegram commands, or `setPaused()` from `src/scheduler.ts`. Cron jobs keep ticking but short-circuit when paused.

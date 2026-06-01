@@ -106,6 +106,16 @@ async function safe<T>(label: string, fn: () => Promise<T>): Promise<T | null> {
 async function dailyJob(): Promise<void> {
   await safe("daily", async () => {
     const result = await runAnalysis("daily");
+    logger.info(
+      {
+        action: result.decision.action,
+        confidence: result.decision.confidence,
+        headline: result.decision.headline,
+        dlmm: `${result.decision.dlmm.verb}: ${result.decision.dlmm.detail}`,
+        reasoning: result.decision.reasoning,
+      },
+      "daily decision",
+    );
     await notify(formatDecisionHtml(result), { html: true });
     await maybeQueueRebalance(result, "daily-ta");
   });
@@ -114,18 +124,16 @@ async function dailyJob(): Promise<void> {
 async function intradayJob(): Promise<void> {
   await safe("intraday", async () => {
     const result = await runAnalysis("intraday");
-    if (result.decision.action === "hold") {
-      logger.info(
-        {
-          confidence: result.decision.confidence,
-          headline: result.decision.headline,
-          dlmm: `${result.decision.dlmm.verb}: ${result.decision.dlmm.detail}`,
-          reasoning: result.decision.reasoning,
-        },
-        "intraday hold — not notifying",
-      );
-      return;
-    }
+    logger.info(
+      {
+        action: result.decision.action,
+        confidence: result.decision.confidence,
+        headline: result.decision.headline,
+        dlmm: `${result.decision.dlmm.verb}: ${result.decision.dlmm.detail}`,
+        reasoning: result.decision.reasoning,
+      },
+      "intraday decision",
+    );
     await notify(formatDecisionHtml(result), { html: true });
     await maybeQueueRebalance(result, "intraday-ta");
   });
