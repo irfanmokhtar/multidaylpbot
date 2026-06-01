@@ -20,8 +20,12 @@ import {
 import {
   approveApproval,
   cancelPending,
+  cancelClose,
+  confirmClose,
   getPendingApproval,
+  getPendingClose,
   getPendingRebalance,
+  proposeClose,
   proposeForApproval,
   rejectApproval,
 } from "./countdown";
@@ -69,6 +73,7 @@ const HELP_TEXT = `<b>multidaylpbot</b> — Meteora DLMM SOL/USDC manager
 /resetbaseline — re-anchor the True P&L baseline to the current position
 /analyze  — raw indicator pass (OHLCV + RSI/EMA/BB/MACD/ATR; no LLM)
 /decide   — full analyzer pass + approval prompt when rebalance recommended (MODE=live)
+/close    — fully exit the position (confirm prompt) + final PnL report (MODE=live)
 /cancel   — no-op (execution is immediate; kept for back-compat)
 /pause    — pause the scheduler (no auto TA / health checks)
 /resume   — resume the scheduler
@@ -283,6 +288,47 @@ export function registerCommands(bot: Telegraf): void {
           err instanceof Error ? err.message : "unknown error"
         }`,
       );
+    }
+  });
+
+  // /close — fully exit the position. Posts a confirm prompt with a pre-close
+  // PnL snapshot; execution happens on the ✅ button. Live-only.
+  bot.command("close", async (ctx) => {
+    const cfg = loadConfig();
+    if (cfg.MODE !== "live") {
+      await ctx.reply(
+        `ℹ️ MODE=${cfg.MODE}: /close is a live-only action. Set MODE=live to enable it.`,
+      );
+      return;
+    }
+    if (getPendingRebalance() || getPendingApproval() || getPendingClose()) {
+      await ctx.reply("⏭ An action is already pending. Resolve it before closing.");
+      return;
+    }
+    await ctx.sendChatAction("typing").catch(() => {});
+    const proposed = await proposeClose("/close");
+    if (!proposed.ok) {
+      await ctx.reply(`⚠️ Could not prepare close: ${proposed.reason ?? "unknown"}`);
+    }
+  });
+
+  bot.action(/^close_confirm:(.+)$/, async (ctx) => {
+    const id = ctx.match[1]!;
+    await ctx.answerCbQuery("Closing…");
+    const result = await confirmClose(id);
+    if (!result.ok) {
+      await ctx.answerCbQuery(`Failed: ${result.reason ?? "unknown"}`, { show_alert: true });
+    }
+  });
+
+  bot.action(/^close_cancel:(.+)$/, async (ctx) => {
+    const id = ctx.match[1]!;
+    const result = cancelClose(id);
+    if (result.ok) {
+      await ctx.answerCbQuery("Cancelled.");
+      await ctx.editMessageText("✖️ Close cancelled.").catch(() => {});
+    } else {
+      await ctx.answerCbQuery("Nothing to cancel.", { show_alert: true });
     }
   });
 

@@ -87,7 +87,7 @@ const MIGRATIONS: string[] = [
      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
      executed_at         INTEGER NOT NULL,
      pool                TEXT    NOT NULL,
-     path                TEXT    NOT NULL,   -- 'balanced' | 'close-reopen'
+     path                TEXT    NOT NULL,   -- 'balanced' | 'close-reopen' | 'close'
      tx_count            INTEGER NOT NULL DEFAULT 0,
      signatures_json     TEXT    NOT NULL DEFAULT '[]',
      sol_fees_lamports   INTEGER NOT NULL DEFAULT 0,

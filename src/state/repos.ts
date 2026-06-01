@@ -295,7 +295,7 @@ export interface ActionLogRow {
   id: number;
   executedAt: number;
   pool: string;
-  path: "balanced" | "close-reopen";
+  path: "balanced" | "close-reopen" | "close";
   txCount: number;
   signatures: string[];
   solFeesLamports: number;
@@ -308,7 +308,7 @@ export interface ActionLogRow {
 export const actionLogRepo = {
   insert(args: {
     pool: string;
-    path: "balanced" | "close-reopen";
+    path: "balanced" | "close-reopen" | "close";
     signatures: string[];
     solFeesLamports: number;
     solPriceUsd: number | null;

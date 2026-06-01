@@ -780,6 +780,133 @@ async function executeCloseAndReopen(
   };
 }
 
+// ─── close (no reopen) ───────────────────────────────────────────────────────
+
+export interface CloseExecution {
+  signatures: string[];
+  /** The position that was closed. */
+  positionAddress: string;
+  /** Bin window of the closed position. */
+  closedWindow: { lower: number; upper: number; width: number };
+  /** Pre-close token amounts (UI units), excluding uncollected fees. */
+  preX: number;
+  preY: number;
+  /** Uncollected swap fees claimed on close (UI units). */
+  feeX: number;
+  feeY: number;
+  /** Pre-close USD value incl. uncollected fees (null when Y is not a stablecoin). */
+  preValueUsd: number | null;
+  /** Active-bin price (Y per X) observed at close time. */
+  priceUsd: number;
+  /** SOL tx-fee cost of the close, in lamports. */
+  solFeesLamports: number;
+}
+
+/**
+ * Fully close the single active position: claim LM rewards, then remove 100%
+ * liquidity with `shouldClaimAndClose` (claims swap fees + closes the position
+ * atomically). No reopen, no swap — both token sides are left in the wallet.
+ *
+ * Mirrors the close portion of {@link executeCloseAndReopen}. Records the close
+ * cost into `action_log` (path `"close"`) so `/fees` accounts for it.
+ */
+export async function executeClose(): Promise<CloseExecution> {
+  const pool = await getDlmmPool();
+  const wallet = loadWallet();
+  const connection = getConnection();
+
+  // Re-sync lbPair/activeId/bitmap before any bin math (same stale-state guard
+  // as executeRebalance — see the 6027 note there).
+  await pool.refetchStates();
+
+  const { userPositions } = await pool.getPositionsByUserAndLbPair(wallet.publicKey);
+  if (userPositions.length === 0) {
+    throw new Error("executeClose: no position on the active pool — nothing to close");
+  }
+  if (userPositions.length > 1) {
+    throw new Error(
+      `executeClose: ${userPositions.length} positions on the active pool — ` +
+        `only a single position is supported. Resolve manually before retrying.`,
+    );
+  }
+  const position: LbPosition = userPositions[0]!;
+  const positionData = position.positionData;
+
+  const xDec = pool.tokenX.mint.decimals;
+  const yDec = pool.tokenY.mint.decimals;
+  const tokenYInfo = resolveToken(pool.tokenY.publicKey.toBase58());
+  const priceUsd = parseFloat((await pool.getActiveBin()).pricePerToken);
+
+  const preX = bnToUi(positionData.totalXAmount, xDec);
+  const preY = bnToUi(positionData.totalYAmount, yDec);
+  const feeX = bnToUi(positionData.feeX.toString(), xDec);
+  const feeY = bnToUi(positionData.feeY.toString(), yDec);
+  const preValueUsd = tokenYInfo.isStablecoin
+    ? (preX + feeX) * priceUsd + (preY + feeY)
+    : null;
+
+  const signatures: string[] = [];
+
+  // 1. LM rewards (no-op when the pool has no farm).
+  const claimRewardTxs = await pool.claimAllRewardsByPosition({
+    owner: wallet.publicKey,
+    position,
+  });
+  for (const tx of claimRewardTxs) {
+    signatures.push(await sendBuiltTx("close-claim-rewards", tx, [wallet], connection));
+  }
+
+  // 2. Remove 100% liquidity + claim swap fees + close the position atomically.
+  const removeTxs = await pool.removeLiquidity({
+    user: wallet.publicKey,
+    position: position.publicKey,
+    fromBinId: positionData.lowerBinId,
+    toBinId: positionData.upperBinId,
+    bps: new BN(10_000),
+    shouldClaimAndClose: true,
+  });
+  for (const tx of removeTxs) {
+    signatures.push(await sendBuiltTx("close-remove", tx, [wallet], connection));
+  }
+
+  const solFeesLamports = await fetchTotalTxFeeLamports(signatures, connection);
+
+  try {
+    actionLogRepo.insert({
+      pool: pool.pubkey.toBase58(),
+      path: "close",
+      signatures,
+      solFeesLamports,
+      solPriceUsd: priceUsd,
+      swapDirection: null,
+      swapInUsd: null,
+      swapOutUsd: null,
+    });
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : err },
+      "action-log: close cost logging failed",
+    );
+  }
+
+  return {
+    signatures,
+    positionAddress: position.publicKey.toBase58(),
+    closedWindow: {
+      lower: positionData.lowerBinId,
+      upper: positionData.upperBinId,
+      width: positionData.upperBinId - positionData.lowerBinId + 1,
+    },
+    preX,
+    preY,
+    feeX,
+    feeY,
+    preValueUsd,
+    priceUsd,
+    solFeesLamports,
+  };
+}
+
 // ─── action cost logging ──────────────────────────────────────────────────────
 
 async function fetchTotalTxFeeLamports(

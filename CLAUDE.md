@@ -23,6 +23,7 @@ npm run decide         # full analyzer pass including LLM decision
 npm run pnl            # fees + Meteora-indexed USD PnL + True P&L (cost-basis) view
 npm run fees           # recent on-chain action costs (tx fees + swap slippage) from action_log
 npm run reset-baseline # re-anchor the True-PnL cost-basis baseline to the current position
+npm run close          # preview pre-close PnL; `-- --yes` fully exits the position (MODE=live)
 ```
 
 SQLite inspection:
@@ -52,13 +53,18 @@ src/
   truePnl.ts         — cost-basis baseline: buildTruePnlReport()/formatTruePnlText(),
                        seedBaselineIfMissing(), previewReset()/resetBaselineToCurrent()/
                        formatResetSummary()
+  closeReport.ts     — buildClosePreviewText()/buildCloseSnapshotText() (read-only pre-close
+                       status + PnL) + executeCloseAndReport() (runs executeClose(), composes
+                       final report); shared by /close (Telegram) + npm run close (CLI)
   index.ts           — boot: config → wallet → DLMM → bot → scheduler
 
   dlmm/
     client.ts        — getDlmmPool() singleton, getActiveBinSummary()
     positions.ts     — getPortfolioSnapshot() → PortfolioSnapshot
     rebalance.ts     — executeRebalance() dispatcher; balanced + close-reopen paths
-                       previewRebalance() / explainPreview() for Telegram proposals
+                       previewRebalance() / explainPreview() for Telegram proposals;
+                       executeClose() — standalone full exit (claim + removeLiquidity close,
+                       no reopen/swap), logs action_log path 'close'
     strategy.ts      — priceToBinId(), priceBoundsToWindow(), mapStrategyType();
                        MIN_RANGE_WIDTH=5 / MAX_RANGE_WIDTH=343 constants
     composition.ts   — deriveTargetXWeight() + currentXWeight() for swap sizing
@@ -97,14 +103,15 @@ src/
 
   telegram/
     bot.ts           — Telegraf init, single-chat auth guard, notify()
-    commands.ts      — /status /pnl /fees /resetbaseline /analyze /decide /cancel
+    commands.ts      — /status /pnl /fees /resetbaseline /analyze /decide /close /cancel
                        /pause /resume /sched /help
     countdown.ts     — queueRebalance() (notify → execute inline, no timer);
                        proposeForApproval()/approveApproval()/rejectApproval()
-                       (inline ✅/❌ buttons for /decide proposals); cancelPending() legacy no-op
+                       (inline ✅/❌ buttons for /decide proposals); cancelPending() legacy no-op;
+                       proposeClose()/confirmClose()/cancelClose() (inline ✅/❌ for /close exits)
 
   cli/
-    status.ts / analyze.ts / decide.ts / pnl.ts / fees.ts / resetBaseline.ts
+    status.ts / analyze.ts / decide.ts / pnl.ts / fees.ts / resetBaseline.ts / close.ts
 ```
 
 ## Pool configuration
@@ -206,7 +213,7 @@ Meteora's `pnlUsd` = (allTimeWithdrawals + currentValue + unclaimedFees) − all
 
 ## Action cost log
 
-Every executed rebalance records its on-chain cost into the `action_log` table via `actionLogRepo.record` (path, tx count, signatures, SOL tx fees in lamports, SOL price, and — for close+reopen — Jupiter swap direction + in/out USD so slippage is captured). `actionLogRepo.recent()` backs `npm run fees` and the `/fees` Telegram command, letting you judge whether a cycle's fee income outpaces its rebalance cost.
+Every executed rebalance records its on-chain cost into the `action_log` table via `actionLogRepo.record` (path, tx count, signatures, SOL tx fees in lamports, SOL price, and — for close+reopen — Jupiter swap direction + in/out USD so slippage is captured). A standalone `/close` (`executeClose()`) logs the same row with path `'close'` (no swap). `actionLogRepo.recent()` backs `npm run fees` and the `/fees` Telegram command, letting you judge whether a cycle's fee income outpaces its rebalance cost.
 
 ## SQLite schema
 

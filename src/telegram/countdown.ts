@@ -20,6 +20,7 @@ import {
   type RebalanceExecution,
 } from "../dlmm/rebalance";
 import type { Decision } from "../ai/types";
+import { buildClosePreviewText, executeCloseAndReport } from "../closeReport";
 import { getBot, notify } from "./bot";
 
 let executing: { id: string; source: string } | null = null;
@@ -142,6 +143,116 @@ export function getPendingRebalance(): {
   source: string;
 } | null {
   return executing ? { id: executing.id, source: executing.source } : null;
+}
+
+// ─── close gate (for /close-triggered exits) ─────────────────────────────────
+
+interface PendingClose {
+  id: string;
+  chatId: string;
+  messageId: number;
+}
+
+let pendingClose: PendingClose | null = null;
+
+export function getPendingClose(): { id: string } | null {
+  return pendingClose ? { id: pendingClose.id } : null;
+}
+
+/** Post a /close confirmation prompt (pre-close snapshot + ✅/❌ buttons). */
+export async function proposeClose(source: string): Promise<ProposeResult> {
+  if (executing) return { ok: false, reason: "already_executing" };
+  if (pendingClose) return { ok: false, reason: "already_pending_close" };
+  if (pendingApproval) return { ok: false, reason: "already_pending_approval" };
+
+  const cfg = loadConfig();
+  const id = String(Date.now());
+
+  let previewBlock: string;
+  try {
+    previewBlock = await buildClosePreviewText();
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : err },
+      "proposeClose: preview failed",
+    );
+    return { ok: false, reason: "preview_failed" };
+  }
+
+  const body =
+    `🔴 <b>Close position</b> (source: ${escapeHtml(source)})\n` +
+    `<pre>${escapeHtml(previewBlock)}</pre>\n` +
+    `Confirm to fully exit — claims fees, removes all liquidity, closes the position.`;
+
+  try {
+    const bot = getBot();
+    const msg = await bot.telegram.sendMessage(cfg.TELEGRAM_CHAT_ID, body, {
+      parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "✅ Confirm close", callback_data: `close_confirm:${id}` },
+          { text: "❌ Cancel",        callback_data: `close_cancel:${id}`  },
+        ]],
+      },
+    });
+    pendingClose = { id, chatId: String(msg.chat.id), messageId: msg.message_id };
+    logger.info({ id, source }, "close proposal posted — awaiting confirm");
+    return { ok: true, id };
+  } catch (err) {
+    logger.error(
+      { err: err instanceof Error ? err.message : err },
+      "proposeClose: send failed",
+    );
+    return { ok: false, reason: "send_failed" };
+  }
+}
+
+export async function confirmClose(id: string): Promise<{ ok: boolean; reason?: string }> {
+  if (!pendingClose || pendingClose.id !== id) {
+    return { ok: false, reason: "id_mismatch" };
+  }
+  if (executing) return { ok: false, reason: "already_executing" };
+  const { chatId, messageId } = pendingClose;
+  pendingClose = null;
+
+  const bot = getBot();
+  await bot.telegram
+    .editMessageReplyMarkup(chatId, messageId, undefined, { inline_keyboard: [] })
+    .catch(() => {});
+
+  executing = { id, source: "/close" };
+  await notify("⚙️ Closing position now.").catch(() => {});
+  try {
+    const report = await executeCloseAndReport();
+    await notify(`<pre>${escapeHtml(report)}</pre>`, { html: true }).catch(() => {});
+    return { ok: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ id, err: msg }, "close execution failed");
+    await notify(
+      `❌ <b>Close failed</b>\n<pre>${escapeHtml(msg)}</pre>\n` +
+        `Position state may be partially modified — verify with /status before retrying.`,
+      { html: true },
+    ).catch(() => {});
+    return { ok: false, reason: "execution_failed" };
+  } finally {
+    executing = null;
+  }
+}
+
+export function cancelClose(id: string): { ok: boolean; reason?: string } {
+  if (!pendingClose || pendingClose.id !== id) {
+    return { ok: false, reason: "id_mismatch" };
+  }
+  const { chatId, messageId } = pendingClose;
+  pendingClose = null;
+  logger.info({ id }, "close proposal cancelled by user");
+  const bot = getBot();
+  void bot.telegram
+    .editMessageReplyMarkup(chatId, messageId, undefined, { inline_keyboard: [] })
+    .catch(() => {});
+  return { ok: true };
 }
 
 export interface QueueResult {
