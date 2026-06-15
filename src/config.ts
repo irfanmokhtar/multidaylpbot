@@ -4,6 +4,7 @@ import { z } from "zod";
 const Mode = z.enum(["dryrun", "live"]);
 const LogLevel = z.enum(["debug", "info", "warn", "error"]);
 const LlmProvider = z.enum(["gemini", "groq", "anthropic", "claudecli"]);
+const RebalanceHorizon = z.enum(["daily", "multiday"]);
 
 const Schema = z.object({
   RPC_URL: z.string().url(),
@@ -26,6 +27,11 @@ const Schema = z.object({
 
   // Path to the daily BTC research brief. Missing file degrades to null context.
   BTC_RESEARCH_PATH: z.string().default("./BTC_DAILY_RESEARCH.md"),
+
+  // Target hold horizon for DLMM ranges. "daily" = narrow, vol-matched ranges
+  // re-centered every ~12-24h (current behavior). "multiday" = wider ranges,
+  // Spot bias, stronger hold-on-noise so executions land every ~2-3 days.
+  REBALANCE_HORIZON: RebalanceHorizon.default("daily"),
 
   MODE: Mode.default("dryrun"),
   LOG_LEVEL: LogLevel.default("info"),

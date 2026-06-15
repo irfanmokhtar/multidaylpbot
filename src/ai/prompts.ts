@@ -143,6 +143,11 @@ BTC MACRO FRAMING (btcContext):
 (price < EMA50 with MACD histogram deeply negative), it CAN override a \
 constructive local SOL signal — SOL rarely fights a bleeding BTC tape. \
 Conversely a constructive BTC tape lets you sit through SOL noise.
+  btcShortTerm = LIVE 4H BTC momentum (price, 24h change%, RSI, MACD hist, \
+ATR%) — the freshest BTC read. A sharp move here (large |changePct24h|, RSI \
+extreme, atrPct jump) OVERRIDES the slower 1D btcContext trend and the daily \
+btcResearch brief for near-term risk: a BTC spike/dump drags SOL regardless of \
+the morning narrative. Especially decisive on intraday cycles.
 
 BTC RESEARCH (btcResearch — daily/ad_hoc only, may be null):
   A curated daily BTC sentiment + TA + Elliott-Wave brief. Treat it as a \
@@ -277,10 +282,21 @@ export function buildSystemPrompt(input: DecisionInput): string {
     input.pool.activeBinPrice,
   );
 
+  const horizonGuidance =
+    input.constraints.rebalanceHorizon === "multiday"
+      ? `REBALANCE HORIZON: MULTIDAY (2–3 day hold target).\n` +
+        `  - Size for SURVIVAL, not peak density: favor the WIDER %-tiers (lean to the 15–30% band, not 2–5%). The range must hold through 2–3 days of SOL swings without the active bin exiting it.\n` +
+        `  - Prefer Spot/uniform over Curve — a concentrated middle dies fast over multi-day moves; you want broad time-in-range.\n` +
+        `  - Hold harder: ROLL/OPEN only on an edge breach (activeBinOffsetPct ≤ ~0.1 or ≥ ~0.9) or a confirmed regime / volatility-regime shift. Tolerate mid-range drift and single-cycle wiggles a daily horizon would re-center on — each execution costs SOL + slippage, and a wide band is meant to be HELD.\n` +
+        `  - Reality: max derivable width here is ~14–15% (343-bin cap). If the 2–3 day expected range exceeds that, pick the widest valid band and accept a re-center on a genuine breakout — do NOT over-tighten chasing fee density.`
+      : `REBALANCE HORIZON: DAILY (12–24h hold target). Standard behavior — size width to current volatility (atrPct) and re-center on edge breaches per the heuristics above.`;
+
   return [
     BASE_SYSTEM_PROMPT,
     "",
     rangeGuidance,
+    "",
+    horizonGuidance,
     "",
     cycleInstructions,
     "",
@@ -308,6 +324,7 @@ export function buildUserMessage(input: DecisionInput): string {
     positions: input.positions,
     btcContext: input.btcContext,
     btcResearch: input.btcResearch,
+    btcShortTerm: input.btcShortTerm,
     indicators: {
       "1H": input.indicators["1H"]
         ? omit(input.indicators["1H"], ["candleCount"])
@@ -338,7 +355,9 @@ export function buildUserMessage(input: DecisionInput): string {
           `TASK:`,
           `1. Full multi-timeframe technical analysis of ${baseSymbol} using current indicators, priorReadings trajectory, and btcContext.`,
           `2. Evaluate active positions (drift vs active bin, fee accrual, range health).`,
-          `3. Recommend optimal Meteora DLMM bounds (lowerBoundPrice, upperBoundPrice, strategyType) for max fee farming over the next 12–24h.`,
+          input.constraints.rebalanceHorizon === "multiday"
+            ? `3. Recommend Meteora DLMM bounds (lowerBoundPrice, upperBoundPrice, strategyType) to STAY IN-RANGE and farm fees over the next 2–3 days with minimal rebalancing — prioritize time-in-range over per-hour fee density.`
+            : `3. Recommend optimal Meteora DLMM bounds (lowerBoundPrice, upperBoundPrice, strategyType) for max fee farming over the next 12–24h.`,
           `4. Provide 3–6 ranked signals and bull/base/bear scenarios summing to 100%.`,
           `5. Respond with ONE JSON object matching the schema — no prose outside JSON, no markdown fences.`,
         ].join("\n");

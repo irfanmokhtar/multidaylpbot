@@ -232,6 +232,30 @@ async function buildDecisionInput(cycle: CycleType): Promise<DecisionInput> {
     logger.warn({ err: err instanceof Error ? err.message : err }, "BTC context fetch failed — skipping");
   }
 
+  // Live 4H BTC momentum — fresh read that catches intraday spikes the 1D trend
+  // + daily brief miss. Independent of btcContext so one failure doesn't drop the
+  // other.
+  let btcShortTerm: DecisionInput["btcShortTerm"] = null;
+  try {
+    const btc4h = await fetchOhlcv({ address: BTC_MINT, interval: "4H", candles: 220 });
+    if (btc4h.length >= 7) {
+      const pack = computeIndicators(btc4h);
+      const closes = btc4h.map((c) => c.c);
+      const prior = closes[closes.length - 7]; // 6 × 4H = 24h ago
+      const changePct24h = prior ? ((pack.close - prior) / prior) * 100 : 0;
+      btcShortTerm = {
+        interval: "4H",
+        price: pack.close,
+        changePct24h,
+        rsi14: pack.rsi14,
+        macdHist: pack.macd?.histogram ?? null,
+        atrPct: pack.atrPct,
+      };
+    }
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : err }, "BTC 4H momentum fetch failed — skipping");
+  }
+
   // Full-analysis cycles (daily + manual ad_hoc) get the BTC research brief;
   // intraday skips it to save tokens.
   const btcResearch = cycle !== "intraday" ? getLatestResearch() : null;
@@ -245,8 +269,10 @@ async function buildDecisionInput(cycle: CycleType): Promise<DecisionInput> {
     recentDecisions,
     btcContext,
     btcResearch,
+    btcShortTerm,
     constraints: {
       maxDeployUsd: cfg.MAX_DEPLOY_USD,
+      rebalanceHorizon: cfg.REBALANCE_HORIZON,
     },
   };
 }

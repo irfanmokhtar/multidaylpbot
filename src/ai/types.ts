@@ -172,6 +172,8 @@ export interface DecisionInput {
   }>;
   constraints: {
     maxDeployUsd: number;
+    /** Target hold horizon — drives range width, strategy, and hold-vs-rebalance bias. */
+    rebalanceHorizon: "daily" | "multiday";
   };
   /** BTC macro trend context — EMA20/EMA50 on 1D. Null if fetch failed. */
   btcContext: {
@@ -188,6 +190,18 @@ export interface DecisionInput {
     ageDays: number;
     stale: boolean;
     text: string;
+  } | null;
+  /**
+   * Live 4H BTC momentum — the freshest BTC read, catches intraday spikes the
+   * 1D btcContext + daily btcResearch brief miss. Null if the fetch failed.
+   */
+  btcShortTerm: {
+    interval: "4H";
+    price: number;
+    changePct24h: number;
+    rsi14: number | null;
+    macdHist: number | null;
+    atrPct: number | null;
   } | null;
 }
 
