@@ -144,6 +144,19 @@ BTC MACRO FRAMING (btcContext):
 constructive local SOL signal — SOL rarely fights a bleeding BTC tape. \
 Conversely a constructive BTC tape lets you sit through SOL noise.
 
+BTC RESEARCH (btcResearch — daily/ad_hoc only, may be null):
+  A curated daily BTC sentiment + TA + Elliott-Wave brief. Treat it as a \
+regime / risk-on-off + sentiment proxy for SOL via beta — NOT as direct SOL \
+price levels (its support/resistance numbers are BTC, not SOL). Use it to:
+  - Set strategy bias: ranging/mean-revert regime → Curve; breakout/high-vol → \
+Spot; falling-knife / capitulation → BidAsk.
+  - Gate event risk: if it flags a dated near-term catalyst (e.g. FOMC \
+dot-plot, treaty signing), prefer a wider range or HOLD over churning a tight \
+range into the event.
+  - Read sentiment divergence (e.g. price up while Fear & Greed pinned in \
+Extreme Fear) as context, not a trigger.
+  If stale=true (ageDays ≥ 1), discount it as dated.
+
 ANALYSIS TASKS (every cycle):
 1. Map dominant signal on each timeframe (1H, 4H, 1D) — bullish / bearish / neutral.
 2. Map EMA stack per timeframe; flag imminent or completed crossovers.
@@ -294,6 +307,7 @@ export function buildUserMessage(input: DecisionInput): string {
     pool: input.pool,
     positions: input.positions,
     btcContext: input.btcContext,
+    btcResearch: input.btcResearch,
     indicators: {
       "1H": input.indicators["1H"]
         ? omit(input.indicators["1H"], ["candleCount"])

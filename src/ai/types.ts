@@ -179,6 +179,16 @@ export interface DecisionInput {
     trend: "bullish" | "bearish" | "neutral";
     detail: string;
   } | null;
+  /**
+   * Newest BTC_DAILY_RESEARCH.md block — sentiment + TA + Elliott Wave brief.
+   * Daily/ad_hoc cycles only; null on intraday or if the file is missing.
+   */
+  btcResearch: {
+    dateIso: string;
+    ageDays: number;
+    stale: boolean;
+    text: string;
+  } | null;
 }
 
 // ─── LLMProvider interface ───────────────────────────────────────────────────

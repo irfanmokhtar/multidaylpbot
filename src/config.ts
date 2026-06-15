@@ -24,6 +24,9 @@ const Schema = z.object({
   // SQLite database path. Defaults to ./data/bot.db (dir auto-created).
   DB_PATH: z.string().default("./data/bot.db"),
 
+  // Path to the daily BTC research brief. Missing file degrades to null context.
+  BTC_RESEARCH_PATH: z.string().default("./BTC_DAILY_RESEARCH.md"),
+
   MODE: Mode.default("dryrun"),
   LOG_LEVEL: LogLevel.default("info"),
 

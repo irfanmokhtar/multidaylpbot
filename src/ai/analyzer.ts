@@ -10,6 +10,7 @@ import { getPortfolioSnapshot } from "../dlmm/positions";
 import { fetchOhlcv, BTC_MINT } from "../data/birdeye";
 import { computeIndicators } from "../data/indicators";
 import { getPool } from "../data/meteora_api";
+import { getLatestResearch } from "../data/btcResearch";
 import { decisionRepo, indicatorReadingRepo } from "../state/repos";
 import { logger } from "../logger";
 
@@ -231,6 +232,10 @@ async function buildDecisionInput(cycle: CycleType): Promise<DecisionInput> {
     logger.warn({ err: err instanceof Error ? err.message : err }, "BTC context fetch failed — skipping");
   }
 
+  // Full-analysis cycles (daily + manual ad_hoc) get the BTC research brief;
+  // intraday skips it to save tokens.
+  const btcResearch = cycle !== "intraday" ? getLatestResearch() : null;
+
   return {
     cycle,
     pool,
@@ -239,6 +244,7 @@ async function buildDecisionInput(cycle: CycleType): Promise<DecisionInput> {
     priorReadings,
     recentDecisions,
     btcContext,
+    btcResearch,
     constraints: {
       maxDeployUsd: cfg.MAX_DEPLOY_USD,
     },
