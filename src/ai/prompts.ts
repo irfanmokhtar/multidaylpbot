@@ -48,6 +48,12 @@ export const DECISION_JSON_SCHEMA = {
     },
     keyLevels: {
       type: "object",
+      description:
+        "Market-structure support/resistance for the base token in absolute USD. " +
+        "Derive from TA ONLY — swing highs/lows, EMA levels, prior pivots, BB edges, " +
+        "round numbers. These are where price reacts, NOT your deployed range. " +
+        "Do NOT copy the position's lowerPriceUsd/upperPriceUsd — they are an output " +
+        "of past S/R, not a source. support < current price < resistance normally.",
       properties: {
         support: { type: ["number", "null"] },
         resistance: { type: ["number", "null"] },
