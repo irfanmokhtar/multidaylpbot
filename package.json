@@ -23,7 +23,7 @@
   },
   "license": "UNLICENSED",
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.95.1",
+    "@anthropic-ai/sdk": "^0.109.1",
     "@google/genai": "^2.0.1",
     "@meteora-ag/dlmm": "^1.9.10",
     "@solana/web3.js": "^1.98.4",
