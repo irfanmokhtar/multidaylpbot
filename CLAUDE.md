@@ -92,7 +92,7 @@ src/
     providers/
       gemini.ts      — Gemini 2.5 Flash; thinkingBudget=1024, finishReason check
       groq.ts        — Llama 3.3 70B via Groq
-      anthropic.ts   — Claude Sonnet via Anthropic SDK
+      anthropic.ts   — Claude Opus 5 via Anthropic SDK (no temperature; thinking on)
       claudecli.ts   — Claude via `claude --print` CLI (subscription; no API key)
 
   state/

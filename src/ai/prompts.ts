@@ -31,8 +31,8 @@ export const DECISION_JSON_SCHEMA = {
         required: ["kind", "title", "note"],
         properties: {
           kind: { type: "string", enum: ["bullish", "bearish", "caution", "structural"] },
-          title: { type: "string" },
-          note: { type: "string", description: "1–2 sentences citing specific indicator values." },
+          title: { type: "string", description: "Max 80 characters." },
+          note: { type: "string", description: "1–2 sentences, max 400 characters. Cite specific indicator values." },
         },
       },
     },
@@ -74,7 +74,7 @@ export const DECISION_JSON_SCHEMA = {
         },
         detail: {
           type: "string",
-          description: "1-line action description with exact bounds, e.g. 'Roll to $185–$215, BidAsk'.",
+          description: "1-line action description, max 400 characters, with exact bounds, e.g. 'Roll to $185–$215, BidAsk'.",
         },
       },
     },
@@ -116,7 +116,7 @@ export const DECISION_JSON_SCHEMA = {
       required: ["priceTarget", "trigger", "probabilityPct"],
       properties: {
         priceTarget: { type: "number" },
-        trigger: { type: "string" },
+        trigger: { type: "string", description: "Max 400 characters." },
         probabilityPct: { type: "integer", minimum: 0, maximum: 100 },
       },
     },

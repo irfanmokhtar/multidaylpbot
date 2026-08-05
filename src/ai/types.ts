@@ -32,14 +32,14 @@ export type SignalKind = z.infer<typeof SignalKind>;
 
 export const Signal = z.object({
   kind: SignalKind,
-  title: z.string().min(3).max(80),
-  note: z.string().min(3).max(240),
+  title: z.string().min(3).transform((s) => s.slice(0, 80)),
+  note: z.string().min(3).transform((s) => s.slice(0, 400)),
 });
 export type Signal = z.infer<typeof Signal>;
 
 export const Scenario = z.object({
   priceTarget: z.number(),
-  trigger: z.string().min(3).max(400),
+  trigger: z.string().min(3).transform((s) => s.slice(0, 400)),
   probabilityPct: z.number().int().min(0).max(100),
 });
 export type Scenario = z.infer<typeof Scenario>;
@@ -60,7 +60,7 @@ export type DlmmVerb = z.infer<typeof DlmmVerb>;
 export const DlmmSuggestion = z.object({
   verb: DlmmVerb,
   /** One-line action description, e.g. "Roll range to 185-210, keep BidAsk". */
-  detail: z.string().min(3).max(240),
+  detail: z.string().min(3).transform((s) => s.slice(0, 400)),
 });
 export type DlmmSuggestion = z.infer<typeof DlmmSuggestion>;
 
@@ -71,8 +71,15 @@ export const Decision = z.object({
   // — TA / reasoning fields —
   /** 1–2 sentence top-line: the single most important development this cycle. */
   headline: z.string().min(10).transform((s) => s.slice(0, 300)),
-  /** 3–6 key signals ranked by importance. Omit on intraday cycles to save tokens. */
-  signals: z.array(Signal).min(3).max(6).optional(),
+  /**
+   * 3–6 key signals ranked by importance. Omit on intraday cycles to save tokens.
+   * Providers without structured-output enforcement (claudecli) sometimes emit 7+;
+   * signals are ranked, so trim the tail instead of rejecting the whole decision.
+   */
+  signals: z.preprocess(
+    (v) => (Array.isArray(v) ? v.slice(0, 6) : v),
+    z.array(Signal).min(3).max(6),
+  ).optional(),
   /** Bull/base/bear scenarios summing to 100%. Omit on intraday cycles. */
   scenarios: Scenarios.optional(),
   keyLevels: KeyLevels.optional(),

@@ -108,7 +108,12 @@ const SECONDS_PER_INTERVAL: Record<Interval, number> = {
 };
 
 interface RawCandle {
-  unixTime: number;
+  /**
+   * Candle open time, unix seconds. Birdeye v3 returns `unix_time`; older
+   * responses used `unixTime`. Both are accepted — see normalizeCandleTime().
+   */
+  unix_time?: number;
+  unixTime?: number;
   o: number;
   h: number;
   l: number;
@@ -207,6 +212,27 @@ function maskKey(k: string): string {
   return `${k.slice(0, 4)}…${k.slice(-4)}`;
 }
 
+/**
+ * Pull the candle open time out of a raw Birdeye item.
+ *
+ * v3 returns `unix_time`; older/other responses used `unixTime`. Reading only
+ * the camelCase name silently produced `t: undefined` on every candle, which
+ * turned the ascending sort into a no-op (NaN comparator) and wrote timestamp-less
+ * blobs into `ohlcv_snapshot`. Indicator math reads closes only, so nothing threw.
+ * Fail loudly instead of letting a bad shape through again.
+ */
+function normalizeCandleTime(r: RawCandle): number {
+  const t = r.unix_time ?? r.unixTime;
+  if (typeof t !== "number" || !Number.isFinite(t)) {
+    throw new Error(
+      `Birdeye candle missing a usable timestamp (expected unix_time or unixTime, got ${JSON.stringify(
+        { unix_time: r.unix_time, unixTime: r.unixTime },
+      )}). The OHLCV response shape may have changed.`,
+    );
+  }
+  return t;
+}
+
 export interface FetchOhlcvOptions {
   /** Token mint address. Defaults to wrapped SOL. */
   address?: string;
@@ -246,11 +272,11 @@ export async function fetchOhlcv(opts: FetchOhlcvOptions): Promise<Candle[]> {
     );
   }
 
-  // Normalize to Candle (renaming unixTime → t) and sort ascending.
+  // Normalize to Candle (unix_time → t) and sort ascending.
   const out: Candle[] = res.data.items
     .map(
       (r): Candle => ({
-        t: r.unixTime,
+        t: normalizeCandleTime(r),
         o: r.o,
         h: r.h,
         l: r.l,
